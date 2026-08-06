@@ -1,4 +1,4 @@
-# so101-assist
+# so101-assist v0.02
 
 A shared-autonomy interface for the SO-101 arm, designed for operation by a
 quadriplegic user: annotated camera feeds, voice or automatic target selection,
@@ -6,6 +6,8 @@ autonomous approach to a pre-grasp pose, and operator fine control via
 keyboard, gamepad, or QuadStick.
 
 Design principle: **the robot handles precision, the operator handles intent.**
+
+[THIS IS A MILESTONE COMMIT THAT INCLUDES QUADSTICK INPUT WITH ANNOTATED VIDEO FEED ONLY. NO VOICE CONTROL AT THIS POINT]
 
 ## Architecture
 
