@@ -1,0 +1,12 @@
+{
+  "max_linear_mps": 0.2,
+  "max_wrist_radps": 0.5,
+  "max_elbow_radps": 0.85,
+  "max_shoulder_radps": 0.45,
+  "setpoint_leash_rad": 0.3,
+  "max_joint_step_deg": 15,
+  "arm_torque_limit_pct": 100,
+  "gripper_torque_limit_pct": 50,
+  "load_stop_threshold": 0.9,
+  "load_stop_ticks": 10
+}

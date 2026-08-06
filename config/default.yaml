@@ -1,0 +1,73 @@
+arm:
+  port: /dev/ttyACM0
+  baud: 1000000
+  control_hz: 50
+  max_linear_mps: 0.06
+  max_wrist_radps: 0.5
+  max_elbow_radps: 0.5
+  max_shoulder_radps: 0.4        # slower: these joints move the entire arm
+  # Per-joint operating range overrides (degrees) — widens/narrows the
+  # range the operator may drive beyond the URDF-modeled defaults.
+  # Guarded by the load monitor + step clamps, not by the model.
+  joint_limits_deg:
+    shoulder_lift: [-150, 150]
+    elbow: [-135, 135]           # URDF models +-97; widened (guarded by load monitor)
+  # Collision-stop guard: trips STOP if any joint's normalized load
+  # exceeds threshold for N consecutive ticks. Raised from 0.55/5 so
+  # legitimate high-torque lifts (arm raising its own weight from an
+  # extended pose) don't trip it. Set threshold to `null` to disable
+  # the guard entirely (bring-up only — loses collision protection).
+  load_stop_threshold: 0.9      # normalized servo load
+  load_stop_ticks: 10
+  # Torque headroom for lifting (both needed — the effective limit on
+  # commanded position error, hence servo torque, is the MIN of these):
+  #   setpoint_leash_rad  — controller: how far the setpoint may lead
+  #                         the measured position
+  #   max_joint_step_deg  — driver per-call clamp (was the binding one
+  #                         at 5 deg); the servo can't push past this
+  # Raise both to lift more; lower for gentler pushes into contact.
+  setpoint_leash_rad: 0.3
+  max_joint_step_deg: 15
+  # Runtime servo torque caps (% of rated), written to the SRAM
+  # Torque_Limit register — live, non-persistent (resets on power
+  # cycle). Arm joints high for lift/hold; gripper limited so a stalled
+  # grasp can't burn out the servo. Higher = more force + more heat.
+  arm_torque_limit_pct: 100
+  gripper_torque_limit_pct: 50
+
+# IMPORTANT: fence bounds are only valid for the calibration they were
+# measured under — recalibrating shifts the zero pose and moves the
+# whole FK frame. Re-measure with scripts/fk_live.py after every
+# recalibration or physical remount.
+#
+# z floor measured 2026-07-26 under the CURRENT calibration: gripper
+# resting on the table reads z ~= +0.10; floor set just below so table
+# objects stay reachable. x/y/ceiling are deliberately LOOSE interim
+# bounds (the pre-recalibration sweep no longer applies) — tighten them
+# with a fresh fk_live sweep before unsupervised end-user sessions.
+workspace_fence:                 # meters, robot base frame
+  x: [-0.15, 0.50]
+  y: [-0.45, 0.45]
+  z: [0.08, 0.65]
+
+cameras:
+  overhead: { index: 0, width: 1280, height: 720, fps: 30 }
+  wrist:    { index: 2, width: 640,  height: 480, fps: 30 }
+
+perception:
+  detector: yolo_world           # yolo_world | owlv2
+  ambient_prompts: [keys, phone, cup, remote control, pen, glasses, plate, bowl, computer]
+  score_threshold: 0.30
+  detect_hz: 5                   # detection loop rate, decoupled from control_hz
+  localizer: table_plane         # table_plane | depth_camera
+
+voice:
+  model: small
+  device: cpu
+  command_words: [go, stop, grip, release, cancel, home, next mode]
+
+operator:
+  device: keyboard               # keyboard | gamepad | quadstick
+  jog_expo: 1.6
+  quadstick:
+    joystick_deadzone: 0.08
