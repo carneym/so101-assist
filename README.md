@@ -51,15 +51,22 @@ operator input (keyboard / gamepad / quadstick) ──────────�
 
 ## Setup
 
+Linux / Raspberry Pi (aarch64 tested on a Pi 5):
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[arm,inputs,dev]"
 ```
 
-Then follow the **[getting-started tutorial](docs/getting-started.md)**
-(find the port → calibrate → drive with the QuadStick), and see
+<sub>Windows PowerShell: `python -m venv .venv; .venv\Scripts\Activate.ps1` then the same `pip install`.</sub>
+
+On a fresh Linux/Pi box you'll also need a few system packages and to be
+in the `dialout` (serial) and `input` (joystick) groups — the
+getting-started tutorial's **Step 0** covers this. Then follow the rest
+of the **[getting-started tutorial](docs/getting-started.md)** (find the
+port → calibrate → drive with the QuadStick), and see
 **[docs/controls.md](docs/controls.md)** for the full control map. Add
-the `perception,voice` extras for Phase 2+.
+the `perception,voice` extras for Phase 2+ (both are heavy on ARM).
 
 ## Safety notes
 

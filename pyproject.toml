@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so101-assist"
+version = "0.02"
+description = "Shared-autonomy interface for the SO-101 arm, operable by keyboard, gamepad, or QuadStick."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Core runtime: everything imported eagerly by the control loop and
+# config plumbing. Hardware, input, ML and voice backends are opt-in
+# extras below so a bring-up box only pulls what it needs.
+dependencies = [
+    "numpy>=2.0,<2.3",      # upper bound tracks lerobot's numpy pin (arm extra)
+    "pyyaml>=6.0",
+    "opencv-python>=4.8",   # camera capture + teleop video window (cv2)
+]
+
+[project.optional-dependencies]
+# Talk to the physical arm: LeRobot's Feetech STS3215 driver. As of
+# lerobot 0.6, the Feetech SDK (scservo_sdk) lives behind lerobot's
+# own `feetech` extra — without it FeetechMotorsBus raises ImportError
+# at construction — so we depend on lerobot[feetech], not bare lerobot.
+# pyserial (port enumeration) is pulled in transitively but pinned here
+# so scripts/*_test.py --list-only work even without the full stack.
+#
+# NOTE for Raspberry Pi / any non-CUDA machine: lerobot depends on
+# torch, and PyPI's aarch64 torch wheel drags in ~450 MB of unusable
+# NVIDIA CUDA packages. Install a CPU-only torch FIRST so this extra
+# finds it already satisfied (see docs/getting-started.md, Step 1):
+#   pip install "torch>=2.7,<2.12" "torchvision>=0.22,<0.27" \
+#       --index-url https://download.pytorch.org/whl/cpu
+arm = [
+    "lerobot[feetech]>=0.6",
+    "pyserial>=3.5",
+]
+
+# QuadStick / gamepad teleop. pygame is used (not evdev) so the input
+# drivers stay cross-platform; see so101_assist/control/inputs/base.py.
+inputs = [
+    "pygame>=2.5",
+]
+
+# Phase 2 perception (open-vocab detection + masks). Heavy on ARM —
+# not needed for core arm+QuadStick teleop.
+perception = [
+    "ultralytics>=8.1",
+    "torch>=2.7,<2.12",     # match lerobot's torch pin to avoid a resolver conflict
+]
+
+# Phase 3 voice. Also heavy on ARM.
+voice = [
+    "faster-whisper>=1.0",
+]
+
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["so101_assist*"]
+
+[tool.ruff]
+line-length = 100
