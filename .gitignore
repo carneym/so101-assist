@@ -4,6 +4,7 @@ __pycache__/
 config/calibration/*.npz
 config/calibration/*.json
 config/tuning.json
+config/poses.json
 config/arm_status.json
 *.mp4
 .ruff_cache/

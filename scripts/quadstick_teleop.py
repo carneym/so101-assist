@@ -51,6 +51,13 @@ import yaml
 from so101_assist.arm.controller import CartesianController
 from so101_assist.arm.driver import JOINT_NAMES, SO101Driver
 from so101_assist.arm.kinematics import JOINT_LIMITS_RAD
+from so101_assist.arm.poses import (
+    DEFAULT_MATCH_TOL_RAD,
+    DEFAULT_POSES_PATH,
+    Pose,
+    load_poses,
+    match_pose,
+)
 from so101_assist.arm.safety import LoadMonitor, WorkspaceFence
 from so101_assist.bus import TOPIC_DETECTIONS, TOPIC_JOG, Bus
 from so101_assist.control.inputs.quadstick import QuadStickDevice
@@ -89,9 +96,15 @@ def resolve_load_warn(arm_cfg: dict) -> float | None:
     return float(stop) * LOAD_WARN_FRACTION if stop is not None else None
 
 
-def build_notes(controller: CartesianController, load_warn_threshold: float | None) -> list[Note]:
+def build_notes(
+    controller: CartesianController,
+    load_warn_threshold: float | None,
+    poses: dict[str, Pose] | None = None,
+    match_tol_rad: float = DEFAULT_MATCH_TOL_RAD,
+) -> list[Note]:
     """HUD notes for the current controller state (no hardware reads —
     everything here is what the last control tick already measured)."""
+    pose = match_pose(controller.last_joint_pos, poses or {}, match_tol_rad) if poses else None
     return arm_notes(
         joint_load=controller.last_joint_load,
         joint_names=JOINT_NAMES,
@@ -99,6 +112,7 @@ def build_notes(controller: CartesianController, load_warn_threshold: float | No
         stopped=controller.stopped,
         fence_blocks=controller.last_fence_blocks,
         limit_clips=controller.last_limit_clips,
+        pose=pose,
     )
 
 
@@ -224,6 +238,11 @@ def run(
 ) -> None:
     cfg = yaml.safe_load(config_path.read_text())
     load_warn_threshold = resolve_load_warn(cfg["arm"])
+    poses = load_poses(DEFAULT_POSES_PATH)
+    if poses:
+        print(f"[poses] {len(poses)} taught: {', '.join(poses)}")
+    else:
+        print("[poses] none taught — run scripts/teach_pose.py to add them")
     max_linear = cfg["arm"]["max_linear_mps"]
     max_wrist = cfg["arm"]["max_wrist_radps"]
     max_elbow = cfg["arm"].get("max_elbow_radps", 0.5)
@@ -343,7 +362,9 @@ def run(
                         if last_detections:
                             image = draw_detections(image, last_detections)
                     # HUD last so a detection box can never cover it.
-                    image = draw_hud(image, lines, build_notes(controller, load_warn_threshold))
+                    image = draw_hud(
+                        image, lines, build_notes(controller, load_warn_threshold, poses)
+                    )
                     cv2.imshow(CAMERA_WINDOW, image)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     print("\nstopping (q)...")
