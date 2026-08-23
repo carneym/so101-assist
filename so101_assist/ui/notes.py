@@ -25,6 +25,7 @@ def arm_notes(
     joint_names: list[str] | None = None,
     load_warn_threshold: float | None = None,
     stopped: bool = False,
+    bus_error: bool = False,
     fence_blocks: list[str] | None = None,
     limit_clips: list[str] | None = None,
     pose: str | None = None,
@@ -38,6 +39,12 @@ def arm_notes(
     knows — a missing reading produces no note rather than a wrong one.
     """
     notes: list[Note] = []
+
+    # Ranked above STOPPED: while the bus is down nothing the operator
+    # does reaches the arm, so "why are my controls dead" is the first
+    # question to answer.
+    if bus_error:
+        notes.append(Note("SERVO BUS ERROR - holding, retrying", NoteLevel.ALERT))
 
     if stopped:
         notes.append(Note("STOPPED - load guard tripped", NoteLevel.ALERT))

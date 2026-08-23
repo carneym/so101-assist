@@ -85,3 +85,15 @@ operator:
   jog_expo: 1.6
   quadstick:
     joystick_deadzone: 0.08
+    # Axis order depends on which QuadStick Configurator profile the
+    # unit is in — the profile changes its USB identity, and SDL orders
+    # axes per identity. Measured 2026-08-23 with the unit enumerating
+    # as "QuadStick Quad Stick PS4 mode" (USB 16D0:092D): stick X is
+    # axis 0. The driver defaults (axis_x=2) were measured 2026-07-25
+    # under the earlier profile (USB 0F0D:0066), where X was axis 2 —
+    # up/down was axis 1 in BOTH, which is why only left/right broke
+    # when the device re-enumerated.
+    # Re-verify with scripts/quadstick_test.py --raw after any profile
+    # change; if you go back to the old profile, remove these two lines.
+    axis_x: 0
+    axis_y: 1

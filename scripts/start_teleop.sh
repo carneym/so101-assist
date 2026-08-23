@@ -32,6 +32,9 @@ RECALIBRATE=0
 PORT="${SO101_PORT:-}"
 CHECK_ONLY=0
 TELEOP_ARGS=()
+# What the operator actually typed, minus --check, so the
+# --check run can hand back the exact command that drives.
+RERUN_ARGS=()
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -41,7 +44,7 @@ die()  { printf '  \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --recalibrate) RECALIBRATE=1; shift ;;
-    --port) PORT="${2:-}"; shift 2 ;;
+    --port) PORT="${2:-}"; RERUN_ARGS+=(--port "${2:-}"); shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \?//'
@@ -51,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --recalibrate   force a fresh calibration even if one exists"
       echo "  --check         run preflight only, don't launch teleop"
       exit 0 ;;
-    *) TELEOP_ARGS+=("$1"); shift ;;
+    *) TELEOP_ARGS+=("$1"); RERUN_ARGS+=("$1"); shift ;;
   esac
 done
 
@@ -172,7 +175,17 @@ if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
 fi
 
 if [[ "$CHECK_ONLY" == 1 ]]; then
-  echo; bold "Preflight OK — not launching teleop (--check)."; exit 0
+  echo
+  bold "Preflight OK — not launching teleop (--check)."
+  echo "Everything above passed. To actually drive, run the same"
+  echo "command again WITHOUT --check:"
+  echo
+  if [[ ${#RERUN_ARGS[@]} -gt 0 ]]; then
+    printf '    %s %s\n\n' "$0" "${RERUN_ARGS[*]}"
+  else
+    printf '    %s\n\n' "$0"
+  fi
+  exit 0
 fi
 
 # 7 ── go --------------------------------------------------------------

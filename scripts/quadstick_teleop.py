@@ -46,6 +46,7 @@ Safety in this loop, layered:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import time
 from pathlib import Path
@@ -53,6 +54,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from so101_assist.arm.bus_watchdog import TRANSIENT_BUS_ERRORS, BusWatchdog
 from so101_assist.arm.controller import CartesianController
 from so101_assist.arm.driver import JOINT_NAMES, SO101Driver
 from so101_assist.arm.kinematics import JOINT_LIMITS_RAD
@@ -125,6 +127,7 @@ def build_notes(
     load_warn_threshold: float | None,
     poses: dict[str, Pose] | None = None,
     menu: PoseMenu | None = None,
+    bus_error: bool = False,
     match_tol_rad: float = DEFAULT_MATCH_TOL_RAD,
 ) -> list[Note]:
     """HUD notes for the current controller state (no hardware reads —
@@ -135,6 +138,7 @@ def build_notes(
         joint_names=JOINT_NAMES,
         load_warn_threshold=load_warn_threshold,
         stopped=controller.stopped,
+        bus_error=bus_error,
         fence_blocks=controller.last_fence_blocks,
         limit_clips=controller.last_limit_clips,
         pose=pose,
@@ -365,6 +369,9 @@ def run(
     last_status_write = 0.0
     shown_fence_blocks: list[str] = []
     shown_limit_clips: list[str] = []
+    # Survive a USB/servo-bus hiccup instead of dying on it: hold
+    # position, reopen the port, and only shut down if it stays dead.
+    watchdog = BusWatchdog(driver)
     try:
         # INSIDE the try: enable_torque writes two registers per motor
         # and can fail partway through, leaving earlier motors powered.
@@ -419,7 +426,10 @@ def run(
                     # HUD last so a detection box can never cover it.
                     image = draw_hud(
                         image, lines,
-                        build_notes(controller, load_warn_threshold, poses, menu),
+                        build_notes(
+                            controller, load_warn_threshold, poses, menu,
+                            bus_error=watchdog.consecutive > 0,
+                        ),
                     )
                     cv2.imshow(CAMERA_WINDOW, image)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -439,9 +449,14 @@ def run(
                         max_step_rad=pose_step_rad,
                         max_gripper_step=pose_gripper_step,
                     )
+                    watchdog.record_success()
                 except RuntimeError:
                     print(f"\n[pose] STOPPED during move to {menu.moving.name} — holding.")
                     menu.moving = None
+                    arrived = False
+                except TRANSIENT_BUS_ERRORS as exc:
+                    if not watchdog.record_failure(exc, time.monotonic()):
+                        break
                     arrived = False
                 if arrived:
                     print(f"[pose] arrived at {menu.moving.name}.")
@@ -478,7 +493,19 @@ def run(
                     controller.max_wrist_radps, controller.max_elbow_radps, controller.max_shoulder_radps,
                 ))
 
-            ticked = controller.tick(cmd, dt=period)
+            try:
+                ticked = controller.tick(cmd, dt=period)
+            except TRANSIENT_BUS_ERRORS as exc:
+                # The arm holds by itself while the bus is down: torque
+                # is a servo-side register, so commanding nothing IS the
+                # safe action here.
+                if not watchdog.record_failure(exc, time.monotonic()):
+                    break
+                elapsed = time.monotonic() - tick_start
+                if elapsed < period:
+                    time.sleep(period - elapsed)
+                continue
+            watchdog.record_success()
 
             # Publish EE position for the tuning GUI's live readout
             # (throttled; last_ee_xyz updates every tick, even in a hold).
@@ -535,9 +562,20 @@ def run(
             cam_node.stop()
         if cv2 is not None:
             cv2.destroyAllWindows()
-        driver.torque_off()
-        print("torque released.")
-        driver.disconnect()
+        try:
+            driver.torque_off()
+            print("torque released.")
+        except TRANSIENT_BUS_ERRORS as exc:
+            # Raising here would replace the real error with this one and
+            # skip the disconnect. The operator needs the plain-language
+            # version anyway: software has run out of options.
+            print(f"\n*** COULD NOT RELEASE TORQUE: {exc}")
+            print("*** THE ARM MAY STILL BE POWERED AND HOLDING.")
+            print("*** Cut power at the arm's supply — the serial link is gone,")
+            print("*** so no software command can reach the servos.")
+        # Closing a port that already vanished is not worth reporting.
+        with contextlib.suppress(*TRANSIENT_BUS_ERRORS):
+            driver.disconnect()
 
 
 def main() -> None:
