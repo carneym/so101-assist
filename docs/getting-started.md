@@ -10,6 +10,24 @@ inline where they differ.
 Each step builds on the last and is safe to stop at — nothing moves the
 arm under power until Step 7.
 
+> ## Already set this machine up once?
+>
+> Skip everything below. Boot the Pi, plug in the arm and QuadStick, and:
+>
+> ```bash
+> ./scripts/start_teleop.sh
+> ```
+>
+> It activates the venv, auto-detects the serial port, pings the servos,
+> reuses your existing calibration (only calibrating if one is missing or
+> incomplete), checks the QuadStick, and launches teleop. Add
+> `--recalibrate` to force a fresh calibration, `--check` to run the
+> preflight without driving, or `--help` for the rest. Any other flags
+> pass straight through to teleop (`--no-camera`, `--debug`).
+>
+> The steps below are the first-time setup, and the reference for when
+> something goes wrong.
+
 ## What you need
 
 - The SO-101 arm connected by USB, and its wrist camera plugged in

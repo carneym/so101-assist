@@ -40,19 +40,21 @@ arm:
 # whole FK frame. Re-measure with scripts/fk_live.py after every
 # recalibration or physical remount.
 #
-# z floor measured 2026-07-26 under the CURRENT calibration: gripper
-# resting on the table reads z ~= +0.10; floor set just below so table
-# objects stay reachable. x/y/ceiling are deliberately LOOSE interim
-# bounds (the pre-recalibration sweep no longer applies) — tighten them
-# with a fresh fk_live sweep before unsupervised end-user sessions.
+# z floor re-measured 2026-08-18 under the CURRENT (recalibrated on the
+# Pi) calibration: gripper resting on the table reads z ~= 0.00; floor
+# set 0.02 below so table objects stay reachable but the arm can't drive
+# into the surface. Ceiling shifted down ~0.10 to track the new frame
+# zero. x/y and the ceiling are still deliberately LOOSE interim bounds
+# (no fresh sweep yet) — tighten them with a full fk_live sweep before
+# unsupervised end-user sessions.
 workspace_fence:                 # meters, robot base frame
   x: [-0.15, 0.50]
   y: [-0.45, 0.45]
-  z: [0.08, 0.65]
+  z: [-0.02, 0.55]
 
 cameras:
   overhead: { index: 0, width: 1280, height: 720, fps: 30 }
-  wrist:    { index: 2, width: 640,  height: 480, fps: 30 }
+  wrist:    { index: 0, width: 640,  height: 480, fps: 30 }
 
 perception:
   detector: yolo_world           # yolo_world | owlv2
