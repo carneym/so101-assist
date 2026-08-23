@@ -90,6 +90,12 @@ CAMERA_WINDOW = "so101-assist wrist"
 # so the operator sees a servo straining BEFORE the guard stops the arm.
 # Used only when arm.load_warn_threshold isn't set explicitly.
 LOAD_WARN_FRACTION = 0.75
+# A floor-guarded pose move slides along the z floor rather than through
+# it, which means a move whose straight joint path is blocked makes no
+# further progress instead of arriving. Call it stalled once the largest
+# remaining joint error stops shrinking by this much over this long.
+POSE_STALL_EPS_RAD = 0.005
+POSE_STALL_S = 1.5
 TUNING_POLL_S = 0.4
 STATUS_WRITE_S = 0.2   # publish EE position ~5 Hz for the tuning GUI readout
 
@@ -275,6 +281,9 @@ def run(
     # slow enough to watch and abort.
     pose_step_rad = cfg["arm"].get("pose_speed_radps", 0.4) / LOOP_HZ
     pose_gripper_step = cfg["arm"].get("pose_gripper_speed", 0.5) / LOOP_HZ
+    # Pose moves are guarded against the fence's z floor only: joint
+    # interpolation sags through the table even between two safe poses.
+    pose_z_floor = cfg.get("workspace_fence", {}).get("z", [None])[0]
     poses = load_poses(DEFAULT_POSES_PATH)
     if poses:
         print(f"[poses] {len(poses)} taught: {', '.join(poses)}")
@@ -372,6 +381,8 @@ def run(
     # Survive a USB/servo-bus hiccup instead of dying on it: hold
     # position, reopen the port, and only shut down if it stays dead.
     watchdog = BusWatchdog(driver)
+    pose_best_err = float("inf")
+    pose_best_at = 0.0
     try:
         # INSIDE the try: enable_torque writes two registers per motor
         # and can fail partway through, leaving earlier motors powered.
@@ -388,6 +399,7 @@ def run(
                 if menu.open and (not was_open or event.action is PoseAction.CYCLE):
                     print_pose_menu(menu)     # opened, or the selection moved
                 if started is not None:
+                    pose_best_err, pose_best_at = float("inf"), tick_start
                     print(f"\n[pose] moving to {started.name} — right sip aborts.")
                 elif event.action is PoseAction.CANCEL:
                     if was_moving is not None:
@@ -448,6 +460,7 @@ def run(
                         menu.moving.gripper,
                         max_step_rad=pose_step_rad,
                         max_gripper_step=pose_gripper_step,
+                        z_floor=pose_z_floor,
                     )
                     watchdog.record_success()
                 except RuntimeError:
@@ -462,6 +475,20 @@ def run(
                     print(f"[pose] arrived at {menu.moving.name}.")
                     menu.moving = None
                     last_jog = None    # don't apply a stale pre-move stick reading
+                    pose_best_err = float("inf")
+                elif menu.moving is not None and controller.last_joint_pos is not None:
+                    err = float(np.max(np.abs(menu.moving.joints_rad - controller.last_joint_pos)))
+                    if err < pose_best_err - POSE_STALL_EPS_RAD:
+                        pose_best_err, pose_best_at = err, tick_start
+                    elif tick_start - pose_best_at > POSE_STALL_S:
+                        print(
+                            f"\n[pose] move to {menu.moving.name} STALLED at the z floor "
+                            f"({err:.2f} rad short) — the straight path there goes under the "
+                            "table, and sliding along the floor can't get around it.\n"
+                            "       Jog clear of the table and try again."
+                        )
+                        menu.moving = None
+                        pose_best_err = float("inf")
                 elapsed = time.monotonic() - tick_start
                 if elapsed < period:
                     time.sleep(period - elapsed)

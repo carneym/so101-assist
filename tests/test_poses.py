@@ -11,8 +11,12 @@ import pytest
 from so101_assist.arm.driver import JOINT_NAMES
 from so101_assist.arm.poses import (
     Pose,
+    ee_height,
+    floor_guarded_step,
     load_poses,
+    lowest_on_path,
     match_pose,
+    path_clears_floor,
     save_poses,
     step_toward,
 )
@@ -143,3 +147,85 @@ def test_step_toward_converges():
 
     assert arrived
     np.testing.assert_allclose(current, target)
+
+
+# --------------------------------------------------------------- path safety
+
+# Measured, not invented: a jogged start (ee z = +0.068) moving to this
+# arm's real taught HOME (+0.028). Both clear of the table, yet the
+# straight joint path sags to -0.030 — 3 cm under it, around t=0.56.
+# Nothing about the endpoints reveals it; this is the field bug.
+SAG_START = np.array([-1.1647, 0.9455, 1.4436, 0.7315, 0.0])
+SAG_END = np.array([-0.1979, -1.7254, 1.5574, 1.0434, -0.3522])
+
+
+def test_lowest_on_path_finds_a_sag_between_clear_endpoints():
+    assert ee_height(SAG_START) > 0.0 and ee_height(SAG_END) > 0.0
+
+    lowest = lowest_on_path(SAG_START, SAG_END)
+
+    assert lowest < 0.0                      # under the table
+    assert not path_clears_floor(SAG_START, SAG_END, z_floor=0.0)
+
+
+def test_path_clears_floor_accepts_a_short_safe_move():
+    a = np.zeros(N)
+    assert path_clears_floor(a, a + 0.01, z_floor=-1.0)
+
+
+def test_guard_leaves_a_safe_step_untouched():
+    q = np.zeros(N)
+    desired = q + 0.01
+
+    guarded = floor_guarded_step(q, desired, z_floor=-1.0)
+
+    np.testing.assert_allclose(guarded, desired)
+
+
+def test_guard_lifts_a_step_that_would_breach_the_floor():
+    q = np.zeros(N)
+    floor = ee_height(q)                    # standing exactly on the floor
+    down = q.copy()
+    down[1] += 0.3                          # shoulder_lift down -> EE drops
+    assert ee_height(down) < floor          # unguarded, this breaches
+
+    guarded = floor_guarded_step(q, down, z_floor=floor)
+
+    assert ee_height(guarded) >= floor - 1e-6
+
+
+def test_guard_keeps_every_step_of_a_sagging_move_above_the_floor():
+    """The end-to-end property: replay the whole move under the guard
+    and prove the gripper never goes under the table."""
+    floor = 0.0
+    q = SAG_START.copy()
+    step = 0.4 / 25                          # config default speed, one tick
+    lowest = ee_height(q)
+
+    for _ in range(2000):
+        delta = SAG_END - q
+        nxt = SAG_END.copy() if np.max(np.abs(delta)) <= step else q + np.clip(delta, -step, step)
+        q = floor_guarded_step(q, nxt, floor)
+        lowest = min(lowest, ee_height(q))
+        if np.max(np.abs(SAG_END - q)) <= 1e-3:
+            break
+
+    assert lowest >= floor - 1e-6            # never under the table
+    assert lowest < ee_height(SAG_START) + 1.0   # it did actually move
+
+
+def test_guard_is_a_local_constraint_not_a_planner():
+    """Documented limitation: sliding along the floor cannot route
+    around a blockage, so some moves stall short instead of arriving.
+    The teleop loop detects that; the guard must not pretend otherwise."""
+    floor = 0.0
+    q = SAG_START.copy()
+    step = 0.4 / 25
+    for _ in range(2000):
+        delta = SAG_END - q
+        nxt = SAG_END.copy() if np.max(np.abs(delta)) <= step else q + np.clip(delta, -step, step)
+        nq = floor_guarded_step(q, nxt, floor)
+        if np.max(np.abs(nq - q)) < 1e-9:
+            break
+        q = nq
+    assert ee_height(q) >= floor - 1e-6

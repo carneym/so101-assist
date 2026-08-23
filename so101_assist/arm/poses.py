@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from .driver import JOINT_NAMES
+from .kinematics import fk, jacobian
 
 DEFAULT_POSES_PATH = Path("config/poses.json")
 
@@ -138,3 +139,88 @@ def step_toward(
     if np.max(np.abs(delta)) <= max_step_rad:
         return target.copy(), True
     return current + np.clip(delta, -max_step_rad, max_step_rad), False
+
+
+# --------------------------------------------------------------- path safety
+
+# How finely a candidate path is sampled when checking it against the
+# floor. The dip between two poses is smooth, so this only has to be
+# fine enough not to step over the lowest point; 60 samples across a
+# move of a radian or so is ~1 degree per sample.
+PATH_SAMPLES = 60
+
+
+def ee_height(joints_rad: np.ndarray) -> float:
+    """End-effector z in the base frame, meters."""
+    return float(fk(np.asarray(joints_rad))[2, 3])
+
+
+def lowest_on_path(start_rad: np.ndarray, end_rad: np.ndarray, samples: int = PATH_SAMPLES) -> float:
+    """Lowest end-effector z along the straight JOINT-space path.
+
+    This is the whole problem with interpolating in joint space: both
+    endpoints can be well clear of the table while the path between them
+    swings the gripper straight through it. Nothing about the endpoints
+    tells you that — you have to look at the path.
+    """
+    start = np.asarray(start_rad, dtype=float)
+    end = np.asarray(end_rad, dtype=float)
+    return min(ee_height(start + (end - start) * t) for t in np.linspace(0.0, 1.0, samples))
+
+
+def path_clears_floor(
+    start_rad: np.ndarray,
+    end_rad: np.ndarray,
+    z_floor: float,
+    samples: int = PATH_SAMPLES,
+) -> bool:
+    return lowest_on_path(start_rad, end_rad, samples) >= z_floor
+
+
+def floor_guarded_step(
+    current_rad: np.ndarray,
+    next_rad: np.ndarray,
+    z_floor: float,
+    corrections: int = 3,
+) -> np.ndarray:
+    """Keep one interpolation step from putting the gripper under the table.
+
+    Joint-space interpolation does not preserve Cartesian constraints:
+    measured on real taught poses, a path between two configurations
+    BOTH clear of the table sags through it around the middle (worst
+    seen: endpoints at +0.07 and +0.03, sagging to -0.04). Neither
+    endpoint reveals it, so the only reliable place to catch it is at
+    every step.
+
+    Applies the same rule WorkspaceFence uses for Cartesian velocity,
+    expressed in joint space through the Jacobian's z row: strip the
+    step's downward component so lateral progress survives, then push
+    out any residual breach. The arm slides along the floor instead of
+    through it.
+
+    This is a local constraint, not a planner — it cannot route around
+    an obstruction, so a move whose straight path is blocked will slide
+    until it stalls. Callers must detect that stall (see
+    scripts/quadstick_teleop.py) rather than assume arrival.
+    """
+    q = np.asarray(current_rad, dtype=float)
+    step = np.asarray(next_rad, dtype=float) - q
+
+    Jz = jacobian(q)[2, :]
+    denom = float(Jz @ Jz)
+    if denom > 1e-9 and ee_height(q + step) < z_floor:
+        along = float(Jz @ step)
+        if along < 0:
+            step = step - Jz * (along / denom)
+
+    guarded = q + step
+    for _ in range(corrections):
+        z = ee_height(guarded)
+        if z >= z_floor:
+            break
+        Jz2 = jacobian(guarded)[2, :]
+        denom2 = float(Jz2 @ Jz2)
+        if denom2 < 1e-9:
+            break      # singular in z: nothing to push against
+        guarded = guarded + Jz2 * ((z_floor - z) / denom2)
+    return guarded

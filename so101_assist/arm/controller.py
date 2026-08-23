@@ -54,6 +54,7 @@ import numpy as np
 from ..messages import CartesianVelocity
 from .driver import JOINT_NAMES, SO101Driver
 from .kinematics import JOINT_LIMITS_RAD, fk, jacobian
+from .poses import floor_guarded_step
 from .safety import LoadMonitor, WorkspaceFence
 
 # Hard caps, applied after any blending. Tune conservatively.
@@ -238,6 +239,7 @@ class CartesianController:
         target_gripper: float,
         max_step_rad: float,
         max_gripper_step: float,
+        z_floor: float | None = None,
     ) -> bool:
         """Drive one bounded step toward a joint-space target. Returns
         True once the arm has arrived.
@@ -248,11 +250,19 @@ class CartesianController:
         monitor still trips on a collision, a STOP still holds, joint
         limits still clip, and last_* stay fresh for the HUD.
 
-        The workspace fence is NOT applied — it constrains Cartesian
-        velocity, and a pose is a joint-space target that was taught by
-        physically placing the arm there. Poses must be taught inside
-        the reachable workspace; teaching one through an obstacle would
-        drive through it.
+        `z_floor` (meters, base frame) guards the ONE Cartesian
+        constraint that matters on the way: joint-space interpolation
+        sags, so a path between two poses both clear of the table can
+        still drag the gripper through it. Each step is corrected to
+        stay above the floor (see poses.floor_guarded_step). The rest of
+        the workspace fence still does not apply — it constrains
+        Cartesian velocity, while a pose is a joint-space target taught
+        by physically placing the arm there.
+
+        The floor guard is local: it cannot route around a blockage, so
+        a move whose straight path is obstructed slides along the floor
+        and stops making progress. Callers must watch for that stall
+        instead of waiting for an arrival that never comes.
 
         Raises RuntimeError if called while stopped — resuming is an
         explicit operator action, never a side effect of a pose move.
@@ -273,6 +283,15 @@ class CartesianController:
         delta = target - joint_pos
         arrived = bool(np.max(np.abs(delta)) <= max_step_rad)
         next_q = target if arrived else joint_pos + np.clip(delta, -max_step_rad, max_step_rad)
+
+        if z_floor is not None:
+            next_q = floor_guarded_step(joint_pos, next_q, z_floor)
+            next_q = np.array(
+                [np.clip(q, *self.joint_limits[name]) for name, q in zip(JOINT_NAMES, next_q)]
+            )
+            # The guard may have pushed the step off the target, so
+            # arrival is decided on where we are actually going.
+            arrived = bool(np.max(np.abs(target - next_q)) <= 1e-3)
 
         gripper_delta = float(np.clip(target_gripper - gripper_pos, -max_gripper_step, max_gripper_step))
         next_gripper = float(np.clip(gripper_pos + gripper_delta, 0.0, 1.0))
