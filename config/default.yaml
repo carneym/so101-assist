@@ -19,6 +19,12 @@ arm:
   # the guard entirely (bring-up only — loses collision protection).
   load_stop_threshold: 0.9      # normalized servo load
   load_stop_ticks: 10
+  # Video HUD shows a red FORCE HIGH note above this load, warning the
+  # operator before the guard above actually stops the arm. Display
+  # only — never stops motion. Omit to derive it from
+  # load_stop_threshold; set it explicitly to keep a warning when the
+  # guard is disabled (load_stop_threshold: null) during bring-up.
+  load_warn_threshold: 0.675
   # Torque headroom for lifting (both needed — the effective limit on
   # commanded position error, hence servo torque, is the MIN of these):
   #   setpoint_leash_rad  — controller: how far the setpoint may lead

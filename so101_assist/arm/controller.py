@@ -116,6 +116,14 @@ class CartesianController:
         # tick, for UI/tuning readout. Updated every tick INCLUDING while
         # stopped, so the readout stays live during a STOP hold.
         self.last_ee_xyz: np.ndarray | None = None
+        # Measured joint position/load from the most recent tick. Kept
+        # so UI can show live load without issuing its OWN read_state()
+        # — a second reader at video rate would double serial traffic on
+        # the servo bus and compete with the control loop for it.
+        # Updated every tick INCLUDING while stopped (same as
+        # last_ee_xyz), so a load warning stays visible during a hold.
+        self.last_joint_pos: np.ndarray | None = None
+        self.last_joint_load: np.ndarray | None = None
 
     def stop(self) -> None:
         """STOP: hold current position, torque stays ON."""
@@ -138,6 +146,8 @@ class CartesianController:
         False if stopped (STOP state or load monitor trip)."""
         joint_pos, joint_load, gripper_pos = self.driver.read_state()
         self.last_ee_xyz = fk(joint_pos)[:3, 3]
+        self.last_joint_pos = joint_pos
+        self.last_joint_load = joint_load
 
         if self.load_monitor is not None and self.load_monitor.feed(joint_load):
             self.stopped = True

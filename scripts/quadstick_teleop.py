@@ -60,12 +60,46 @@ from so101_assist.control.tuning import resolve as resolve_tuning
 from so101_assist.messages import CartesianVelocity, Detection, JogCommand, JogMode
 from so101_assist.perception.camera import CameraNode
 from so101_assist.perception.detector import DetectorNode
-from so101_assist.ui.overlay import draw_detections
+from so101_assist.ui.notes import arm_notes
+from so101_assist.ui.overlay import Note, draw_detections, draw_hud
 
 LOOP_HZ = 25.0
 CAMERA_WINDOW = "so101-assist wrist"
+# Fraction of the load-guard threshold at which the HUD starts warning,
+# so the operator sees a servo straining BEFORE the guard stops the arm.
+# Used only when arm.load_warn_threshold isn't set explicitly.
+LOAD_WARN_FRACTION = 0.75
 TUNING_POLL_S = 0.4
 STATUS_WRITE_S = 0.2   # publish EE position ~5 Hz for the tuning GUI readout
+
+
+def resolve_load_warn(arm_cfg: dict) -> float | None:
+    """Load level at which the HUD warns, normalized 0..1.
+
+    Explicit `arm.load_warn_threshold` wins. Otherwise derive it from
+    the guard's stop threshold so the warning always leads the trip.
+    Returns None only when neither is available — i.e. the guard is
+    disabled AND no warn level was set, so there's no meaningful "high"
+    to compare against.
+    """
+    explicit = arm_cfg.get("load_warn_threshold")
+    if explicit is not None:
+        return float(explicit)
+    stop = arm_cfg.get("load_stop_threshold")
+    return float(stop) * LOAD_WARN_FRACTION if stop is not None else None
+
+
+def build_notes(controller: CartesianController, load_warn_threshold: float | None) -> list[Note]:
+    """HUD notes for the current controller state (no hardware reads —
+    everything here is what the last control tick already measured)."""
+    return arm_notes(
+        joint_load=controller.last_joint_load,
+        joint_names=JOINT_NAMES,
+        load_warn_threshold=load_warn_threshold,
+        stopped=controller.stopped,
+        fence_blocks=controller.last_fence_blocks,
+        limit_clips=controller.last_limit_clips,
+    )
 
 
 def apply_tuning(controller: CartesianController, driver: SO101Driver, resolved: dict) -> None:
@@ -189,6 +223,7 @@ def run(
     detect: bool = False,
 ) -> None:
     cfg = yaml.safe_load(config_path.read_text())
+    load_warn_threshold = resolve_load_warn(cfg["arm"])
     max_linear = cfg["arm"]["max_linear_mps"]
     max_wrist = cfg["arm"]["max_wrist_radps"]
     max_elbow = cfg["arm"].get("max_elbow_radps", 0.5)
@@ -292,16 +327,10 @@ def run(
                 if frame is not None:
                     image = frame.image.copy()
                     label = last_mode.name if last_mode is not None else "..."
-                    cv2.putText(
-                        image, f"MODE: {label}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
-                    )
+                    lines = [f"MODE: {label}"]
                     if controller.last_ee_xyz is not None:
                         x, y, z = controller.last_ee_xyz
-                        cv2.putText(
-                            image, f"xyz: {x:+.3f} {y:+.3f} {z:+.3f}", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
-                        )
+                        lines.append(f"xyz: {x:+.3f} {y:+.3f} {z:+.3f}")
                     if det_sub is not None:
                         # detector runs well below the 25 Hz video loop
                         # (see perception.detect_hz) — hold the last
@@ -313,6 +342,8 @@ def run(
                             last_detections = detections
                         if last_detections:
                             image = draw_detections(image, last_detections)
+                    # HUD last so a detection box can never cover it.
+                    image = draw_hud(image, lines, build_notes(controller, load_warn_threshold))
                     cv2.imshow(CAMERA_WINDOW, image)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     print("\nstopping (q)...")

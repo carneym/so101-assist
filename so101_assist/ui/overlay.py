@@ -16,12 +16,82 @@ cv2 is imported lazily so importing this module never needs OpenCV.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum, auto
+
 import numpy as np
 
 from ..messages import Detection
 
 BOX_COLOR = (0, 200, 255)
 TEXT_COLOR = (0, 200, 255)
+
+# HUD: fixed status lines at top-left, then a notes field beneath them.
+HUD_COLOR = (0, 255, 0)
+HUD_ORIGIN = (10, 30)
+LINE_HEIGHT = 30
+FONT_SCALE = 0.8
+FONT_THICKNESS = 2
+
+
+class NoteLevel(Enum):
+    """How loud a note is. Colors are chosen so severity reads at a
+    glance without having to parse the text."""
+    INFO = auto()    # green — same weight as the status lines
+    WARN = auto()    # amber — something is limiting motion
+    ALERT = auto()   # red — the operator should act now
+
+
+NOTE_COLORS = {
+    NoteLevel.INFO: (0, 255, 0),
+    NoteLevel.WARN: (0, 190, 255),
+    NoteLevel.ALERT: (0, 0, 255),
+}
+
+
+@dataclass
+class Note:
+    """One line in the HUD's notes field.
+
+    Kept deliberately dumb — a string plus a severity. Deciding WHAT
+    deserves a note (high servo load, a tripped guard, a reached pose)
+    belongs to the caller, so this module stays pure presentation.
+    """
+    text: str
+    level: NoteLevel = NoteLevel.INFO
+
+
+def draw_hud(
+    image: np.ndarray,
+    lines: list[str],
+    notes: list[Note] | None = None,
+) -> np.ndarray:
+    """Return a copy of `image` with `lines` drawn top-left, then any
+    `notes` immediately beneath them in their severity color.
+
+    The notes field is the operator's channel for anything that isn't
+    steady-state status: a servo pushing hard, a guard that tripped, a
+    named pose the arm has reached. It shares the status lines' left
+    margin and line spacing so it reads as one block.
+    """
+    import cv2
+
+    annotated = image.copy()
+    x, y = HUD_ORIGIN
+    for line in lines:
+        cv2.putText(
+            annotated, line, (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, HUD_COLOR, FONT_THICKNESS, cv2.LINE_AA,
+        )
+        y += LINE_HEIGHT
+    for note in notes or []:
+        cv2.putText(
+            annotated, note.text, (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, NOTE_COLORS[note.level],
+            FONT_THICKNESS, cv2.LINE_AA,
+        )
+        y += LINE_HEIGHT
+    return annotated
 
 
 def draw_detections(image: np.ndarray, detections: list[Detection]) -> np.ndarray:

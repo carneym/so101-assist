@@ -50,6 +50,23 @@ class WorkspaceFence:
         return bool(np.all(ee_xyz >= self.lo) and np.all(ee_xyz <= self.hi))
 
 
+def joints_over(joint_load: np.ndarray, threshold: float | None, names: list[str]) -> list[str]:
+    """Names of joints whose normalized load exceeds `threshold`.
+
+    Pure and read-only — this is the "is anything pushing hard right
+    now" question, separate from LoadMonitor's "has it pushed hard long
+    enough to be a collision" one. Used to warn the operator BEFORE the
+    guard trips, and to give feedback at all when the guard is disabled
+    (`load_stop_threshold: null`), which is common during bring-up.
+
+    `threshold` of None means "no warning level configured" -> never.
+    """
+    if threshold is None:
+        return []
+    load = np.asarray(joint_load)
+    return [name for name, value in zip(names, load) if value > threshold]
+
+
 class LoadMonitor:
     """Trips when any joint's normalized load exceeds `threshold` for
     `ticks` CONSECUTIVE feeds — a sustained overload reads as a
