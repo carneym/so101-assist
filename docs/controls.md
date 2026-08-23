@@ -73,6 +73,34 @@ When the arm is within 10° (all joints) of a taught pose, the HUD shows
 `POSE: <name>`. **Re-teach poses after any recalibration** — calibration
 shifts the zero pose, so old angles point somewhere else.
 
+### Recorded paths and gestures
+
+`teach_pose.py --record --name X` records the whole PATH you move the
+arm through, not just where it ends. Playback follows that path, so the
+arm goes the way you showed it — **around** whatever you went around.
+The floor guard only knows about a horizontal plane; a recorded path is
+the only way to avoid a wheelchair, a box, or your own body.
+
+`teach_pose.py --gesture --name WAVE` records a **gesture** — a motion
+whose point is the motion. Gestures:
+
+- replay at the **tempo you demonstrated** (capped by
+  `arm.gesture_speed_radps`), because a wave replayed at pose speed is
+  just the arm leaning about
+- **repeat** if you recorded a full cycle (ends where it began)
+- always start at their first waypoint — a wave that begins halfway
+  through isn't a wave
+- never appear in the `POSE:` readout: you perform a gesture, you're
+  never *in* one
+
+Both appear in the pose menu, tagged `(path)` or `(gesture)`.
+
+> **Speed is the open question.** `gesture_speed_radps` defaults to 1.0,
+> which makes a hand-demonstrated wave replay roughly 5x slower than
+> taught. Raising it makes gestures legible but moves the arm faster
+> near people — tune it on hardware, and consider that a fast wrist roll
+> is far less dangerous than a fast shoulder swing.
+
 ## Notes field (video overlay)
 
 Under the mode/xyz lines, colored by urgency:

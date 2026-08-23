@@ -229,3 +229,77 @@ def test_guard_is_a_local_constraint_not_a_planner():
             break
         q = nq
     assert ee_height(q) >= floor - 1e-6
+
+
+# ------------------------------------------------- recorded paths & gestures
+
+def test_a_recorded_path_round_trips(tmp_path):
+    from so101_assist.arm.poses import KIND_GESTURE
+    from so101_assist.arm.trajectory import Waypoint
+
+    path_file = tmp_path / "poses.json"
+    wave = Pose(
+        name="WAVE",
+        joints_rad=np.zeros(N),
+        description="hello",
+        kind=KIND_GESTURE,
+        loop=True,
+        path=[
+            Waypoint(0.0, np.zeros(N), 0.0),
+            Waypoint(0.5, np.full(N, 0.4), 0.5),
+            Waypoint(1.0, np.zeros(N), 0.0),
+        ],
+    )
+
+    save_poses({"WAVE": wave}, path_file)
+    loaded = load_poses(path_file)["WAVE"]
+
+    assert loaded.is_gesture and loaded.loop and loaded.has_path
+    assert len(loaded.path) == 3
+    assert loaded.path[1].t == 0.5                       # timing preserved
+    np.testing.assert_allclose(loaded.path[1].joints_rad, np.full(N, 0.4), atol=1e-4)
+    assert loaded.path[1].gripper == pytest.approx(0.5)
+
+
+def test_legacy_single_point_poses_still_load(tmp_path):
+    """Poses taught before paths existed must keep working untouched —
+    nobody should have to re-teach because the format grew."""
+    path_file = tmp_path / "poses.json"
+    path_file.write_text(json.dumps({
+        "joint_names": JOINT_NAMES,
+        "poses": {"HOME": {"joints_deg": [0.0] * N, "gripper": 0.0, "description": "old"}},
+    }))
+
+    home = load_poses(path_file)["HOME"]
+
+    assert not home.has_path and not home.is_gesture
+    assert home.description == "old"
+
+
+def test_a_paths_end_point_is_its_final_waypoint(tmp_path):
+    """Everything that only cares about the destination keeps working."""
+    from so101_assist.arm.trajectory import Waypoint
+
+    path_file = tmp_path / "poses.json"
+    save_poses({"P": Pose("P", np.zeros(N), path=[
+        Waypoint(0.0, np.zeros(N)), Waypoint(1.0, np.full(N, 0.7), 0.25),
+    ])}, path_file)
+
+    loaded = load_poses(path_file)["P"]
+
+    np.testing.assert_allclose(loaded.joints_rad, np.full(N, 0.7), atol=1e-4)
+    assert loaded.gripper == pytest.approx(0.25)
+
+
+def test_gestures_are_excluded_from_the_pose_readout():
+    """A gesture ends where it began, so the arm is always 'at' one —
+    reporting that would be noise. You perform a wave, you're not in it."""
+    from so101_assist.arm.poses import KIND_GESTURE
+
+    poses = {
+        "WAVE": Pose("WAVE", np.zeros(N), kind=KIND_GESTURE),
+        "HOME": Pose("HOME", np.full(N, 1.0)),
+    }
+
+    assert match_pose(np.zeros(N), poses, tol_rad=0.1) is None
+    assert match_pose(np.full(N, 1.0), poses, tol_rad=0.1) == "HOME"

@@ -46,6 +46,12 @@ arm:
   # (right sip). Raise only once the taught poses are trusted.
   pose_speed_radps: 0.4
   pose_gripper_speed: 0.5       # gripper travel (0..1) per second
+  # Gestures (scripts/teach_pose.py --gesture) replay at the tempo they
+  # were demonstrated, capped here. Fast motion near a person is a
+  # different safety case from a slow move to a pose above a table, so
+  # this is separate from pose_speed_radps. The whole motion is scaled
+  # by one factor, preserving the rhythm that makes a gesture legible.
+  gesture_speed_radps: 1.0
 
 # IMPORTANT: fence bounds are only valid for the calibration they were
 # measured under — recalibrating shifts the zero pose and moves the

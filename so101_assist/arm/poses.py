@@ -27,6 +27,7 @@ import numpy as np
 
 from .driver import JOINT_NAMES
 from .kinematics import fk, jacobian
+from .trajectory import Waypoint, is_loop
 
 DEFAULT_POSES_PATH = Path("config/poses.json")
 
@@ -37,13 +38,38 @@ DEFAULT_POSES_PATH = Path("config/poses.json")
 DEFAULT_MATCH_TOL_RAD = math.radians(10)
 
 
+KIND_POSE = "pose"
+KIND_GESTURE = "gesture"
+
+
 @dataclass(frozen=True)
 class Pose:
-    """One named arm configuration, in JOINT_NAMES order."""
+    """One named motion.
+
+    `joints_rad` is always the configuration the arm ENDS in, so
+    everything that only cares about the destination (matching, the HUD
+    readout, a direct move) is unchanged by paths existing.
+
+    `path`, when present, is the recorded route to get there — see
+    trajectory.py. `kind` separates a POSE (somewhere to be; the path is
+    just a safer way of arriving) from a GESTURE (something to do; the
+    motion IS the point, and it ends where it started).
+    """
     name: str
     joints_rad: np.ndarray
     gripper: float = 0.0          # 0 closed .. 1 open
     description: str = ""
+    kind: str = KIND_POSE
+    path: list[Waypoint] | None = None
+    loop: bool = False            # cyclic: can be repeated N times
+
+    @property
+    def is_gesture(self) -> bool:
+        return self.kind == KIND_GESTURE
+
+    @property
+    def has_path(self) -> bool:
+        return bool(self.path) and len(self.path) > 1
 
     def max_error(self, joint_pos: np.ndarray) -> float:
         """Largest per-joint deviation from this pose, radians."""
@@ -66,18 +92,43 @@ def load_poses(path: Path | str = DEFAULT_POSES_PATH) -> dict[str, Pose]:
 
     poses: dict[str, Pose] = {}
     for name, fields in raw.get("poses", {}).items():
-        joints_deg = fields["joints_deg"]
-        if len(joints_deg) != len(JOINT_NAMES):
-            raise ValueError(
-                f"pose '{name}' in {path} has {len(joints_deg)} joints, expected {len(JOINT_NAMES)}"
-            )
+        # Two forms: a legacy single configuration, or a recorded path.
+        # Poses taught before paths existed keep working untouched.
+        raw_path = fields.get("path")
+        waypoints = None
+        if raw_path:
+            waypoints = [
+                Waypoint(
+                    t=float(sample["t"]),
+                    joints_rad=_check_joints(sample["joints_deg"], name, path),
+                    gripper=float(sample.get("gripper", 0.0)),
+                )
+                for sample in raw_path
+            ]
+            joints_rad = waypoints[-1].joints_rad
+            gripper = waypoints[-1].gripper
+        else:
+            joints_rad = _check_joints(fields["joints_deg"], name, path)
+            gripper = float(fields.get("gripper", 0.0))
+
         poses[name] = Pose(
             name=name,
-            joints_rad=np.radians(np.asarray(joints_deg, dtype=float)),
-            gripper=float(fields.get("gripper", 0.0)),
+            joints_rad=joints_rad,
+            gripper=gripper,
             description=fields.get("description", ""),
+            kind=fields.get("kind", KIND_POSE),
+            path=waypoints,
+            loop=bool(fields.get("loop", is_loop(waypoints) if waypoints else False)),
         )
     return poses
+
+
+def _check_joints(joints_deg, name: str, path: Path) -> np.ndarray:
+    if len(joints_deg) != len(JOINT_NAMES):
+        raise ValueError(
+            f"pose '{name}' in {path} has {len(joints_deg)} joints, expected {len(JOINT_NAMES)}"
+        )
+    return np.radians(np.asarray(joints_deg, dtype=float))
 
 
 def save_poses(poses: dict[str, Pose], path: Path | str = DEFAULT_POSES_PATH) -> None:
@@ -87,16 +138,29 @@ def save_poses(poses: dict[str, Pose], path: Path | str = DEFAULT_POSES_PATH) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "joint_names": JOINT_NAMES,
-        "poses": {
-            pose.name: {
-                "joints_deg": [round(float(a), 2) for a in np.degrees(pose.joints_rad)],
-                "gripper": round(pose.gripper, 3),
-                "description": pose.description,
-            }
-            for pose in poses.values()
-        },
+        "poses": {pose.name: _dump(pose) for pose in poses.values()},
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _dump(pose: Pose) -> dict:
+    fields: dict = {
+        "joints_deg": [round(float(a), 2) for a in np.degrees(pose.joints_rad)],
+        "gripper": round(pose.gripper, 3),
+        "description": pose.description,
+        "kind": pose.kind,
+    }
+    if pose.path:
+        fields["loop"] = pose.loop
+        fields["path"] = [
+            {
+                "t": round(wp.t, 3),
+                "joints_deg": [round(float(a), 2) for a in np.degrees(wp.joints_rad)],
+                "gripper": round(wp.gripper, 3),
+            }
+            for wp in pose.path
+        ]
+    return fields
 
 
 def match_pose(
@@ -109,11 +173,17 @@ def match_pose(
     Every joint must be within `tol_rad`. If several poses qualify (they
     were taught close together), the closest one wins so the readout is
     never ambiguous.
+
+    GESTURES are excluded: a gesture ends where it began, so the arm is
+    always "at" one, and reporting that says nothing. You are never IN a
+    wave — you perform one.
     """
     if joint_pos is None or not poses:
         return None
     best: tuple[float, str] | None = None
     for name, pose in poses.items():
+        if pose.is_gesture:
+            continue
         error = pose.max_error(joint_pos)
         if error <= tol_rad and (best is None or error < best[0]):
             best = (error, name)

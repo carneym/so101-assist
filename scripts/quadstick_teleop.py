@@ -66,6 +66,11 @@ from so101_assist.arm.poses import (
     match_pose,
 )
 from so101_assist.arm.safety import LoadMonitor, WorkspaceFence
+from so101_assist.arm.trajectory import (
+    TrajectoryPlayer,
+    nearest_waypoint_index,
+    speed_scale_for_cap,
+)
 from so101_assist.bus import TOPIC_DETECTIONS, TOPIC_JOG, TOPIC_POSE, Bus
 from so101_assist.control.inputs.quadstick import QuadStickDevice
 from so101_assist.control.pose_menu import PoseMenu
@@ -96,6 +101,12 @@ LOAD_WARN_FRACTION = 0.75
 # remaining joint error stops shrinking by this much over this long.
 POSE_STALL_EPS_RAD = 0.005
 POSE_STALL_S = 1.5
+# Gestures replay at the tempo they were demonstrated, capped: fast
+# motion near a person is a different safety case from a slow move to a
+# pose above a table. The whole motion is scaled by one factor so its
+# rhythm survives (see trajectory.py).
+GESTURE_MAX_JOINT_RADPS = 1.0
+GESTURE_REPEATS = 3          # cycles for a cyclic gesture (one taught wave -> a wave)
 TUNING_POLL_S = 0.4
 STATUS_WRITE_S = 0.2   # publish EE position ~5 Hz for the tuning GUI readout
 
@@ -116,6 +127,27 @@ def resolve_load_warn(arm_cfg: dict) -> float | None:
     return float(stop) * LOAD_WARN_FRACTION if stop is not None else None
 
 
+def make_player(pose: Pose, current_joints) -> TrajectoryPlayer | None:
+    """Player for a recorded path, or None to move straight to the end.
+
+    A GESTURE always starts at its first waypoint — a wave that begins
+    halfway through isn't a wave. A POSE with a path joins at the
+    nearest waypoint instead, so the arm doesn't first travel back to
+    the start of a route it's already partway along.
+    """
+    if not pose.has_path:
+        return None
+    waypoints = pose.path
+    if not pose.is_gesture and current_joints is not None:
+        waypoints = waypoints[nearest_waypoint_index(waypoints, current_joints):] or waypoints
+    speed = speed_scale_for_cap(pose.path, GESTURE_MAX_JOINT_RADPS)
+    return TrajectoryPlayer(
+        waypoints,
+        speed=speed,
+        repeats=GESTURE_REPEATS if (pose.is_gesture and pose.loop) else 1,
+    )
+
+
 def print_pose_menu(menu: PoseMenu) -> None:
     """Mirror the on-screen menu to the console — the operator may be
     looking at either, and a helper watching the terminal should see
@@ -125,7 +157,9 @@ def print_pose_menu(menu: PoseMenu) -> None:
         print("  (no poses taught — run scripts/teach_pose.py)")
         return
     for i, name in enumerate(menu.names):
-        print(f"  {'>' if i == menu.selected else ' '} {name}")
+        pose = menu.poses[name]
+        tag = "  (gesture)" if pose.is_gesture else ("  (path)" if pose.has_path else "")
+        print(f"  {'>' if i == menu.selected else ' '} {name}{tag}")
 
 
 def build_notes(
@@ -281,6 +315,7 @@ def run(
     # slow enough to watch and abort.
     pose_step_rad = cfg["arm"].get("pose_speed_radps", 0.4) / LOOP_HZ
     pose_gripper_step = cfg["arm"].get("pose_gripper_speed", 0.5) / LOOP_HZ
+    gesture_step_rad = cfg["arm"].get("gesture_speed_radps", GESTURE_MAX_JOINT_RADPS) / LOOP_HZ
     # Pose moves are guarded against the fence's z floor only: joint
     # interpolation sags through the table even between two safe poses.
     pose_z_floor = cfg.get("workspace_fence", {}).get("z", [None])[0]
@@ -383,6 +418,7 @@ def run(
     watchdog = BusWatchdog(driver)
     pose_best_err = float("inf")
     pose_best_at = 0.0
+    player: TrajectoryPlayer | None = None      # set while following a recorded path
     try:
         # INSIDE the try: enable_torque writes two registers per motor
         # and can fail partway through, leaving earlier motors powered.
@@ -400,7 +436,13 @@ def run(
                     print_pose_menu(menu)     # opened, or the selection moved
                 if started is not None:
                     pose_best_err, pose_best_at = float("inf"), tick_start
-                    print(f"\n[pose] moving to {started.name} — right sip aborts.")
+                    player = make_player(started, controller.last_joint_pos)
+                    how = "following recorded path" if player else "moving"
+                    if started.is_gesture:
+                        how = "performing"
+                    print(f"\n[pose] {how} {started.name} — right sip aborts.")
+                elif event.action is PoseAction.CANCEL:
+                    player = None
                 elif event.action is PoseAction.CANCEL:
                     if was_moving is not None:
                         print(f"[pose] move to {was_moving.name} aborted — arm holds position.")
@@ -455,28 +497,51 @@ def run(
             if menu.moving is not None:
                 sub.latest()   # discard jog accumulated during the move
                 try:
-                    arrived = controller.step_to_joints(
-                        menu.moving.joints_rad,
-                        menu.moving.gripper,
-                        max_step_rad=pose_step_rad,
-                        max_gripper_step=pose_gripper_step,
-                        z_floor=pose_z_floor,
-                    )
+                    if player is not None:
+                        # Follow the recorded path: command the sample at
+                        # the current playback time, and only advance that
+                        # time while the arm is keeping up (the player's
+                        # own leash) so a lagging joint can't let the
+                        # target run away down the path.
+                        wp_joints, wp_gripper = player.target()
+                        controller.step_to_joints(
+                            wp_joints, wp_gripper,
+                            max_step_rad=pose_step_rad if not menu.moving.is_gesture
+                            else gesture_step_rad,
+                            max_gripper_step=pose_gripper_step,
+                            z_floor=pose_z_floor,
+                        )
+                        arrived = player.advance(period, controller.last_joint_pos)
+                    else:
+                        arrived = controller.step_to_joints(
+                            menu.moving.joints_rad,
+                            menu.moving.gripper,
+                            max_step_rad=pose_step_rad,
+                            max_gripper_step=pose_gripper_step,
+                            z_floor=pose_z_floor,
+                        )
                     watchdog.record_success()
                 except RuntimeError:
                     print(f"\n[pose] STOPPED during move to {menu.moving.name} — holding.")
                     menu.moving = None
+                    player = None
                     arrived = False
                 except TRANSIENT_BUS_ERRORS as exc:
                     if not watchdog.record_failure(exc, time.monotonic()):
                         break
                     arrived = False
                 if arrived:
-                    print(f"[pose] arrived at {menu.moving.name}.")
+                    verb = "performed" if menu.moving.is_gesture else "arrived at"
+                    print(f"[pose] {verb} {menu.moving.name}.")
                     menu.moving = None
+                    player = None
                     last_jog = None    # don't apply a stale pre-move stick reading
                     pose_best_err = float("inf")
-                elif menu.moving is not None and controller.last_joint_pos is not None:
+                elif (
+                    menu.moving is not None
+                    and controller.last_joint_pos is not None
+                    and (player is None or not player.waiting)
+                ):
                     err = float(np.max(np.abs(menu.moving.joints_rad - controller.last_joint_pos)))
                     if err < pose_best_err - POSE_STALL_EPS_RAD:
                         pose_best_err, pose_best_at = err, tick_start
@@ -488,6 +553,7 @@ def run(
                             "       Jog clear of the table and try again."
                         )
                         menu.moving = None
+                        player = None
                         pose_best_err = float("inf")
                 elapsed = time.monotonic() - tick_start
                 if elapsed < period:
