@@ -286,6 +286,26 @@ going down, or a control seems dead, the console will say why
 (`[fence] ...`, `[limit] ...`, or `STOPPED` for a load trip). The fence
 z-floor should be just below the table-touch `z` you noted in Step 5.
 
+## 9b. Teach the named poses (optional)
+
+With the arm connected, teach the poses you'll jump to from the pose
+menu. Torque stays off — you position the arm by hand:
+
+```bash
+python scripts/teach_pose.py --port /dev/ttyACM0
+```
+
+It walks you through **HOME** (tucked in, gripper closed), **RAISED**,
+and **EXTENDED** — move the arm into each and press Enter. Check them
+with `--list`, redo one with `--name HOME`.
+
+Then in teleop: **right puff** opens the pose menu, **stick up/down**
+chooses, **lip switch** goes, **right sip** aborts. See
+[controls.md](controls.md#named-poses).
+
+> **Re-teach after any recalibration** — calibration shifts the zero
+> pose, so previously taught angles point somewhere else.
+
 ## 10. Fine-tune live
 
 In a **second terminal** (venv active), while teleop runs:

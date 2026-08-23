@@ -13,8 +13,13 @@ grasping never needs a mode switch:
             stick up/down -> shoulder_lift (up = arm up)
 - ELBOW:    stick up/down -> elbow joint (up = arm up/reach out),
             stick left/right -> shoulder_pan
-- WRIST:    LEFT/RIGHT-tube sip/puff -> z velocity,
+- WRIST:    LEFT-tube sip/puff -> z velocity,
             stick left/right -> wrist roll, stick up/down -> wrist flex
+
+Named poses (taught with scripts/teach_pose.py): RIGHT puff opens the
+pose menu, stick up/down chooses, lip switch goes, RIGHT sip exits or
+aborts a move in progress. Jogging is suspended while the menu is open
+and while a move runs.
 
 The wrist camera feed is shown in an OpenCV window while driving (the
 active mode name and live end-effector xyz are overlaid). It degrades
@@ -59,12 +64,19 @@ from so101_assist.arm.poses import (
     match_pose,
 )
 from so101_assist.arm.safety import LoadMonitor, WorkspaceFence
-from so101_assist.bus import TOPIC_DETECTIONS, TOPIC_JOG, Bus
+from so101_assist.bus import TOPIC_DETECTIONS, TOPIC_JOG, TOPIC_POSE, Bus
 from so101_assist.control.inputs.quadstick import QuadStickDevice
+from so101_assist.control.pose_menu import PoseMenu
 from so101_assist.control.tuning import DEFAULT_TUNING_PATH, write_status
 from so101_assist.control.tuning import load as load_tuning
 from so101_assist.control.tuning import resolve as resolve_tuning
-from so101_assist.messages import CartesianVelocity, Detection, JogCommand, JogMode
+from so101_assist.messages import (
+    CartesianVelocity,
+    Detection,
+    JogCommand,
+    JogMode,
+    PoseAction,
+)
 from so101_assist.perception.camera import CameraNode
 from so101_assist.perception.detector import DetectorNode
 from so101_assist.ui.notes import arm_notes
@@ -96,10 +108,23 @@ def resolve_load_warn(arm_cfg: dict) -> float | None:
     return float(stop) * LOAD_WARN_FRACTION if stop is not None else None
 
 
+def print_pose_menu(menu: PoseMenu) -> None:
+    """Mirror the on-screen menu to the console — the operator may be
+    looking at either, and a helper watching the terminal should see
+    the same thing the video shows."""
+    print("\n== POSE MENU ==  stick up/down = choose, lip switch = go, right sip = exit")
+    if not menu.names:
+        print("  (no poses taught — run scripts/teach_pose.py)")
+        return
+    for i, name in enumerate(menu.names):
+        print(f"  {'>' if i == menu.selected else ' '} {name}")
+
+
 def build_notes(
     controller: CartesianController,
     load_warn_threshold: float | None,
     poses: dict[str, Pose] | None = None,
+    menu: PoseMenu | None = None,
     match_tol_rad: float = DEFAULT_MATCH_TOL_RAD,
 ) -> list[Note]:
     """HUD notes for the current controller state (no hardware reads —
@@ -113,6 +138,9 @@ def build_notes(
         fence_blocks=controller.last_fence_blocks,
         limit_clips=controller.last_limit_clips,
         pose=pose,
+        pose_menu=menu.menu_lines() if menu is not None else None,
+        pose_selected=menu.selected if menu is not None else 0,
+        pose_moving=menu.moving.name if menu is not None and menu.moving else None,
     )
 
 
@@ -238,6 +266,11 @@ def run(
 ) -> None:
     cfg = yaml.safe_load(config_path.read_text())
     load_warn_threshold = resolve_load_warn(cfg["arm"])
+    # Pose-move speed, converted to a per-tick step. Deliberately slower
+    # than jogging: the operator isn't steering this one, so it has to be
+    # slow enough to watch and abort.
+    pose_step_rad = cfg["arm"].get("pose_speed_radps", 0.4) / LOOP_HZ
+    pose_gripper_step = cfg["arm"].get("pose_gripper_speed", 0.5) / LOOP_HZ
     poses = load_poses(DEFAULT_POSES_PATH)
     if poses:
         print(f"[poses] {len(poses)} taught: {', '.join(poses)}")
@@ -254,6 +287,10 @@ def run(
 
     bus = Bus()
     sub = bus.subscribe(TOPIC_JOG, maxsize=4)
+    # Pose events are discrete actions, drained (not collapsed) every
+    # tick — see Subscription.drain. Sized to hold a tick's worth.
+    pose_sub = bus.subscribe(TOPIC_POSE, maxsize=32)
+    menu = PoseMenu(poses)
     quadstick = QuadStickDevice.from_config(bus, cfg["operator"])
 
     cam_node = None
@@ -333,6 +370,19 @@ def run(
         while True:
             tick_start = time.monotonic()
 
+            for event in pose_sub.drain():
+                was_open, was_moving = menu.open, menu.moving
+                started = menu.handle(event)
+                if menu.open and (not was_open or event.action is PoseAction.CYCLE):
+                    print_pose_menu(menu)     # opened, or the selection moved
+                if started is not None:
+                    print(f"\n[pose] moving to {started.name} — right sip aborts.")
+                elif event.action is PoseAction.CANCEL:
+                    if was_moving is not None:
+                        print(f"[pose] move to {was_moving.name} aborted — arm holds position.")
+                    elif was_open:
+                        print("[pose] menu closed")
+
             if tick_start - last_tuning_poll > TUNING_POLL_S:
                 last_tuning_poll = tick_start
                 mtime = tuning_path.stat().st_mtime if tuning_path.exists() else 0.0
@@ -363,12 +413,39 @@ def run(
                             image = draw_detections(image, last_detections)
                     # HUD last so a detection box can never cover it.
                     image = draw_hud(
-                        image, lines, build_notes(controller, load_warn_threshold, poses)
+                        image, lines,
+                        build_notes(controller, load_warn_threshold, poses, menu),
                     )
                     cv2.imshow(CAMERA_WINDOW, image)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     print("\nstopping (q)...")
                     break
+
+            # A pose move owns the arm while it runs: jog is drained and
+            # discarded so a stick nudge can't fight the move, and the
+            # only ways out are arrival, right sip (CANCEL), a load trip,
+            # or Ctrl-C.
+            if menu.moving is not None:
+                sub.latest()   # discard jog accumulated during the move
+                try:
+                    arrived = controller.step_to_joints(
+                        menu.moving.joints_rad,
+                        menu.moving.gripper,
+                        max_step_rad=pose_step_rad,
+                        max_gripper_step=pose_gripper_step,
+                    )
+                except RuntimeError:
+                    print(f"\n[pose] STOPPED during move to {menu.moving.name} — holding.")
+                    menu.moving = None
+                    arrived = False
+                if arrived:
+                    print(f"[pose] arrived at {menu.moving.name}.")
+                    menu.moving = None
+                    last_jog = None    # don't apply a stale pre-move stick reading
+                elapsed = time.monotonic() - tick_start
+                if elapsed < period:
+                    time.sleep(period - elapsed)
+                continue
 
             jog = sub.latest()
             if jog is not None:

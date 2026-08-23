@@ -40,6 +40,12 @@ arm:
   # grasp can't burn out the servo. Higher = more force + more heat.
   arm_torque_limit_pct: 100
   gripper_torque_limit_pct: 50
+  # Speed of an autonomous move to a taught pose (scripts/teach_pose.py,
+  # right puff in teleop). Slower than jogging on purpose: the operator
+  # isn't steering it, so it must be slow enough to watch and abort
+  # (right sip). Raise only once the taught poses are trusted.
+  pose_speed_radps: 0.4
+  pose_gripper_speed: 0.5       # gripper travel (0..1) per second
 
 # IMPORTANT: fence bounds are only valid for the calibration they were
 # measured under — recalibrating shifts the zero pose and moves the

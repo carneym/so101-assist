@@ -28,6 +28,9 @@ def arm_notes(
     fence_blocks: list[str] | None = None,
     limit_clips: list[str] | None = None,
     pose: str | None = None,
+    pose_menu: list[str] | None = None,
+    pose_selected: int = 0,
+    pose_moving: str | None = None,
 ) -> list[Note]:
     """Build the HUD notes field for one frame.
 
@@ -45,12 +48,26 @@ def arm_notes(
             peak = float(np.max(np.asarray(joint_load)))
             notes.append(Note(f"FORCE HIGH: {', '.join(hot)} ({peak:.2f})", NoteLevel.ALERT))
 
+    # The arm moving under its own power outranks anything advisory —
+    # the operator's first question is "what is it doing and how do I
+    # stop it", so the abort is named in the line itself.
+    if pose_moving:
+        notes.append(Note(f"MOVING TO {pose_moving} - right sip aborts", NoteLevel.ALERT))
+
     if fence_blocks:
         notes.append(Note(f"fence: blocking {', '.join(fence_blocks)}", NoteLevel.WARN))
     if limit_clips:
         notes.append(Note(f"limit: {', '.join(limit_clips)}", NoteLevel.WARN))
 
-    if pose:
+    if pose_menu is not None:
+        notes.append(Note("POSE MENU  (lip=go, right sip=exit)", NoteLevel.WARN))
+        if not pose_menu:
+            notes.append(Note("  (none taught - run teach_pose.py)", NoteLevel.INFO))
+        for i, name in enumerate(pose_menu):
+            marker = ">" if i == pose_selected else " "
+            notes.append(Note(f" {marker} {name}", NoteLevel.INFO))
+    elif pose:
+        # Only while not browsing — the menu already says where we are.
         notes.append(Note(f"POSE: {pose}", NoteLevel.INFO))
 
     return notes

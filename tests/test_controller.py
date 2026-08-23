@@ -361,3 +361,91 @@ def test_resume_reseeds_setpoint_from_measured_position():
     controller.tick(_vel(), dt=0.04)   # zero velocity
 
     assert driver.writes[-1][0][3] == pytest.approx(0.5)   # holds where it IS, no jump
+
+
+# ------------------------------------------------- pose moves (step_to_joints)
+
+def test_step_to_joints_moves_in_bounded_steps_and_reports_arrival():
+    driver = FakeDriver(np.zeros(5))
+    controller = CartesianController(driver)
+    target = np.full(5, 0.5)
+
+    arrived = controller.step_to_joints(target, 0.0, max_step_rad=0.1, max_gripper_step=1.0)
+
+    assert not arrived
+    np.testing.assert_allclose(driver.joint_pos, np.full(5, 0.1))
+
+    for _ in range(20):
+        arrived = controller.step_to_joints(target, 0.0, max_step_rad=0.1, max_gripper_step=1.0)
+        if arrived:
+            break
+    assert arrived
+    np.testing.assert_allclose(driver.joint_pos, target)
+
+
+def test_step_to_joints_refuses_while_stopped():
+    """A pose move must never be the thing that un-stops a stopped arm."""
+    controller = CartesianController(FakeDriver(np.zeros(5)))
+    controller.stop()
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        controller.step_to_joints(np.zeros(5), 0.0, max_step_rad=0.1, max_gripper_step=0.1)
+
+
+def test_step_to_joints_trips_on_overload_and_stops():
+    driver = FakeDriver(np.zeros(5))
+    driver.joint_load = np.full(5, 0.99)
+    controller = CartesianController(driver, load_monitor=LoadMonitor(threshold=0.9, ticks=1))
+
+    with pytest.raises(RuntimeError):
+        controller.step_to_joints(np.ones(5), 0.0, max_step_rad=0.1, max_gripper_step=0.1)
+    assert controller.stopped
+
+
+def test_step_to_joints_clips_target_to_joint_limits():
+    driver = FakeDriver(np.zeros(5))
+    controller = CartesianController(driver)
+    controller.joint_limits = {name: (-0.2, 0.2) for name in controller.joint_limits}
+
+    for _ in range(50):
+        if controller.step_to_joints(np.full(5, 5.0), 0.0, max_step_rad=0.1, max_gripper_step=0.1):
+            break
+
+    assert np.all(driver.joint_pos <= 0.2 + 1e-9)
+
+
+def test_step_to_joints_updates_live_readouts_for_the_hud():
+    driver = FakeDriver(np.zeros(5))
+    driver.joint_load = np.full(5, 0.4)
+    controller = CartesianController(driver)
+
+    controller.step_to_joints(np.full(5, 0.3), 0.0, max_step_rad=0.1, max_gripper_step=0.1)
+
+    assert controller.last_ee_xyz is not None
+    np.testing.assert_allclose(controller.last_joint_load, np.full(5, 0.4))
+
+
+def test_step_to_joints_moves_the_gripper_within_its_step():
+    driver = FakeDriver(np.zeros(5))
+    driver.gripper_pos = 0.0
+    controller = CartesianController(driver)
+
+    controller.step_to_joints(np.zeros(5), 1.0, max_step_rad=0.1, max_gripper_step=0.25)
+
+    assert driver.gripper_pos == pytest.approx(0.25)
+
+
+def test_jog_after_a_pose_move_resumes_from_where_the_move_ended():
+    """The jog setpoint must follow the pose move, or the first stick
+    input afterwards would snap the arm back toward the pre-move pose."""
+    driver = FakeDriver(np.zeros(5))
+    controller = CartesianController(driver)
+
+    for _ in range(20):
+        if controller.step_to_joints(np.full(5, 0.4), 0.0, max_step_rad=0.1, max_gripper_step=0.5):
+            break
+    moved_to = driver.joint_pos.copy()
+
+    controller.tick(_vel(), dt=0.04)      # zero-velocity jog tick
+
+    np.testing.assert_allclose(driver.joint_pos, moved_to, atol=1e-6)

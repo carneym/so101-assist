@@ -48,13 +48,34 @@ class Subscription:
         return self._q.get(timeout=timeout)
 
     def latest(self) -> Any | None:
-        """Drain the queue and return only the newest message."""
+        """Drain the queue and return only the newest message.
+
+        Right for state-like topics (frames, jog input) where a stale
+        message has no value once a newer one exists.
+        """
         msg = None
         while True:
             try:
                 msg = self._q.get_nowait()
             except queue.Empty:
                 return msg
+
+    def drain(self) -> list[Any]:
+        """Every queued message, oldest first.
+
+        Right for EVENT-like topics, where each message is a discrete
+        operator action rather than a snapshot of state: collapsing a
+        burst with latest() would silently drop, say, a menu step that
+        arrived in the same loop tick as the confirm that followed it.
+        Subscribe such topics with a maxsize big enough to hold a tick's
+        worth of events, since the queue still drops the oldest when full.
+        """
+        msgs = []
+        while True:
+            try:
+                msgs.append(self._q.get_nowait())
+            except queue.Empty:
+                return msgs
 
 
 # Canonical topic names — import these, don't use raw strings.
@@ -64,6 +85,7 @@ TOPIC_DETECTIONS = "perception.detections"
 TOPIC_TARGET = "target.selected"
 TOPIC_VOICE = "voice.event"
 TOPIC_JOG = "operator.jog"
+TOPIC_POSE = "operator.pose"
 TOPIC_ARM_STATE = "arm.state"
 TOPIC_ARM_CMD = "arm.cmd"
 TOPIC_STATE = "system.state"

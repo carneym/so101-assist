@@ -9,10 +9,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from so101_assist.bus import TOPIC_JOG, Bus
+from so101_assist.bus import TOPIC_JOG, TOPIC_POSE, Bus
 from so101_assist.control.inputs.base import apply_deadzone, apply_expo
 from so101_assist.control.inputs.quadstick import QuadStickDevice
-from so101_assist.messages import JogMode
+from so101_assist.messages import JogMode, PoseAction
 
 
 class FakeJoystick:
@@ -95,22 +95,30 @@ def test_center_puff_opens_gripper_in_every_mode(device: QuadStickDevice, mode: 
     assert device._read_jog(joystick).gripper_delta == 1.0
 
 
-@pytest.mark.parametrize("button", [4, 5])
-def test_side_sip_reads_negative_on_side_channel(device: QuadStickDevice, button: int):
+def test_left_sip_reads_negative_on_side_channel(device: QuadStickDevice):
     device.mode = JogMode.WRIST
-    joystick = FakeJoystick(buttons={button: True})
+    joystick = FakeJoystick(buttons={4: True})
     cmd = device._read_jog(joystick)
     assert cmd.axes[0] == -1.0        # side breath -> z slot in WRIST mode
     assert cmd.gripper_delta == 0.0   # center channel untouched
 
 
-@pytest.mark.parametrize("button", [6, 7])
-def test_side_puff_reads_positive_on_side_channel(device: QuadStickDevice, button: int):
+def test_left_puff_reads_positive_on_side_channel(device: QuadStickDevice):
     device.mode = JogMode.WRIST
-    joystick = FakeJoystick(buttons={button: True})
+    joystick = FakeJoystick(buttons={6: True})
     cmd = device._read_jog(joystick)
     assert cmd.axes[0] == 1.0
     assert cmd.gripper_delta == 0.0
+
+
+@pytest.mark.parametrize("button", [5, 7])
+def test_right_tube_no_longer_drives_z(device: QuadStickDevice, button: int):
+    """The right tube is the pose-menu channel now — it must not also
+    move the arm, or opening the menu would jog z on the way in."""
+    device.mode = JogMode.WRIST
+    joystick = FakeJoystick(buttons={button: True})
+    cmd = device._read_jog(joystick)
+    assert cmd.axes[0] == 0.0
 
 
 def test_side_breath_is_ignored_outside_wrist_mode(device: QuadStickDevice):
@@ -212,3 +220,186 @@ def test_from_config_reads_operator_block():
     assert device.side_sip_buttons == (4,)
     assert device.side_puff_buttons == (6,)
     assert device.button_mode_next == 3
+
+
+# ------------------------------------------------------------ pose menu
+
+class RecordingBus(Bus):
+    """Captures every publish. The real Subscription only exposes
+    latest() (which collapses a burst to one message) over a queue that
+    drops the oldest past maxsize — neither can prove "exactly one event
+    was emitted", which is the whole point of the edge-trigger tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.published: list[tuple[str, object]] = []
+
+    def publish(self, topic: str, msg: object) -> None:
+        self.published.append((topic, msg))
+        super().publish(topic, msg)
+
+    def pose_events(self) -> list:
+        return [msg for topic, msg in self.published if topic == TOPIC_POSE]
+
+    def clear(self) -> None:
+        self.published.clear()
+
+
+@pytest.fixture
+def pose_bus():
+    bus = RecordingBus()
+    return bus, QuadStickDevice(bus)
+
+
+def test_right_puff_opens_the_menu(pose_bus):
+    bus, device = pose_bus
+
+    device._read_jog(FakeJoystick(buttons={7: True}))
+
+    assert device.pose_menu_open
+    assert [e.action for e in bus.pose_events()] == [PoseAction.ENTER]
+
+
+def test_opening_the_menu_suspends_jogging(pose_bus):
+    """Browsing poses must not drive the arm: zero axes AND zero
+    gripper while the menu is open, whatever the stick is doing."""
+    _, device = pose_bus
+    device.mode = JogMode.WRIST
+
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    cmd = device._read_jog(FakeJoystick(axes={1: 1.0, 2: -1.0}, buttons={0: True, 6: True}))
+
+    assert np.array_equal(cmd.axes, np.zeros(3))
+    assert cmd.gripper_delta == 0.0
+
+
+def test_held_puff_opens_the_menu_only_once(pose_bus):
+    bus, device = pose_bus
+    joystick = FakeJoystick(buttons={7: True})
+
+    for _ in range(5):
+        device._read_jog(joystick)
+
+    assert [e.action for e in bus.pose_events()] == [PoseAction.ENTER]
+
+
+def test_stick_cycles_the_selection_with_a_detent(pose_bus):
+    """One step per deflection: the stick must return toward center
+    before it can step again, or a held stick would run away."""
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+
+    held = FakeJoystick(axes={1: 1.0})
+    for _ in range(5):
+        device._read_jog(held)
+    assert [e.delta for e in bus.pose_events()] == [1]       # one step, not five
+
+    bus.clear()
+    device._read_jog(FakeJoystick(axes={1: 0.0}))            # re-arm
+    device._read_jog(FakeJoystick(axes={1: 1.0}))
+    assert [e.delta for e in bus.pose_events()] == [1]
+
+
+def test_stick_up_steps_up_the_list(pose_bus):
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+
+    device._read_jog(FakeJoystick(axes={1: -1.0}))           # up reads negative
+
+    assert [e.delta for e in bus.pose_events()] == [-1]
+
+
+def test_small_deflection_does_not_step(pose_bus):
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+
+    device._read_jog(FakeJoystick(axes={1: 0.4}))
+
+    assert bus.pose_events() == []
+
+
+def test_lip_switch_confirms_and_closes_the_menu(pose_bus):
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+
+    device._read_jog(FakeJoystick(buttons={1: True}))
+
+    assert [e.action for e in bus.pose_events()] == [PoseAction.SELECT]
+    assert not device.pose_menu_open
+
+
+def test_held_lip_switch_confirms_only_once(pose_bus):
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+    joystick = FakeJoystick(buttons={1: True})
+
+    for _ in range(5):
+        device._read_jog(joystick)
+
+    assert [e.action for e in bus.pose_events()] == [PoseAction.SELECT]
+
+
+def test_lip_switch_does_not_change_jog_mode_while_menu_is_open(pose_bus):
+    _, device = pose_bus
+    device.mode = JogMode.SHOULDER
+    device._read_jog(FakeJoystick(buttons={7: True}))
+
+    device._read_jog(FakeJoystick(buttons={1: True}))
+
+    assert device.mode is JogMode.SHOULDER
+
+
+def test_right_sip_leaves_the_menu(pose_bus):
+    bus, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    bus.clear()
+
+    device._read_jog(FakeJoystick(buttons={5: True}))
+
+    assert [e.action for e in bus.pose_events()] == [PoseAction.CANCEL]
+    assert not device.pose_menu_open
+
+
+def test_right_sip_aborts_even_when_the_menu_is_closed(pose_bus):
+    """After SELECT the menu is closed but the arm is moving — the
+    abort has to still reach the consumer."""
+    bus, device = pose_bus
+
+    device._read_jog(FakeJoystick(buttons={5: True}))
+
+    assert [e.action for e in bus.pose_events()] == [PoseAction.CANCEL]
+
+
+def test_jogging_resumes_after_leaving_the_menu(pose_bus):
+    _, device = pose_bus
+    device._read_jog(FakeJoystick(buttons={7: True}))
+    device._read_jog(FakeJoystick(buttons={5: True}))
+
+    cmd = device._read_jog(FakeJoystick(axes={2: 1.0}))
+
+    assert cmd.axes[0] != 0.0
+
+
+def test_confirming_a_pose_does_not_also_cycle_jog_mode(pose_bus):
+    """The lip switch confirms AND cycles mode, on the same button. A
+    press that selected a pose must not additionally advance the jog
+    mode when the menu closes and jogging resumes."""
+    _, device = pose_bus
+    device.mode = JogMode.SHOULDER
+    device._read_jog(FakeJoystick(buttons={7: True}))       # open menu
+    device._read_jog(FakeJoystick(buttons={1: True}))       # confirm; menu closes
+
+    held = FakeJoystick(buttons={1: True})                  # still holding it
+    for _ in range(3):
+        device._read_jog(held)
+
+    assert device.mode is JogMode.SHOULDER
+
+    device._read_jog(FakeJoystick())                        # released
+    device._read_jog(FakeJoystick(buttons={1: True}))       # a NEW press
+    assert device.mode is JogMode.ELBOW

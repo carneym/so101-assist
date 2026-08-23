@@ -14,10 +14,14 @@ Run: `python scripts/quadstick_teleop.py --port COM3 [--debug]`
 
 The **center sip/puff tube** opens/closes the gripper in every mode —
 grasping never needs a mode switch. Puff = open, sip = close. The
-**side tubes** (left/right, either counts) carry the mode-specific
-breath signal (z in WRIST mode). Sip+puff on the same channel at once
-is treated as noise and ignored; the center and side channels are
-independent (you can puff-open the gripper while side-sipping for z).
+**LEFT tube** carries the mode-specific breath signal (z in WRIST
+mode). The **RIGHT tube** drives the [pose menu](#named-poses) — puff
+opens it, sip exits it or aborts a pose move. Sip+puff on the same
+channel at once is treated as noise and ignored; the channels are
+independent (you can puff-open the gripper while left-sipping for z).
+
+> **Changed 2026-08-23:** the two side tubes used to be interchangeable
+> for z. The right tube is now the pose channel, so z is LEFT-tube only.
 
 | Control | Effect | Position range | Speed |
 |---|---|---|---|
@@ -36,9 +40,53 @@ cheat-sheet (controls, limits, caps) to the console.
 | **SHOULDER** | Stick up/down | Shoulder lift — up = arm up | ❌ (operator choice) | **±150° (config override)** | 0.4 rad/s (`max_shoulder_radps`) |
 | **ELBOW** | Stick up/down | Elbow joint — up = arm up / reach out | ✅ | **±135° (config override)** | 0.5 rad/s (`max_elbow_radps`) |
 | **ELBOW** | Stick left/right | Shoulder pan — right = arm right | ❌ (operator choice) | ±110° (URDF) | 0.4 rad/s (`max_shoulder_radps`) |
-| **WRIST** | Side puff / sip | Up / down (Cartesian z) | ✅ | fence box | 6 cm/s (`max_linear_mps`) |
+| **WRIST** | LEFT puff / sip | Up / down (Cartesian z) | ✅ | fence box | 6 cm/s (`max_linear_mps`) |
 | **WRIST** | Stick left/right | Wrist roll | ❌ (small motion) | −157°…+163° (URDF) | 0.5 rad/s (`max_wrist_radps`) |
 | **WRIST** | Stick up/down | Wrist flex | ❌ (small motion) | ±95° (URDF) | 0.5 rad/s (`max_wrist_radps`) |
+
+## Named poses
+
+Taught with `scripts/teach_pose.py` (arm limp, positioned by hand) and
+stored in `config/poses.json`. The standard set is **HOME** (tucked,
+gripper closed), **RAISED**, and **EXTENDED**.
+
+| Control | Effect |
+|---|---|
+| **Right puff** | Open the pose menu (jogging suspends — the stick stops driving the arm) |
+| **Stick up/down** | Move the highlight through the list, one step per deflection |
+| **Lip switch** | Go to the highlighted pose — this is what authorizes motion |
+| **Right sip** | Exit the menu, or **abort a move already running** |
+
+The menu appears both in the video overlay and the console. While a
+move runs the HUD shows `MOVING TO <name> - right sip aborts` in red,
+and the stick is ignored until it finishes, is aborted, or trips the
+load guard.
+
+Pose moves are slower than jogging on purpose (`arm.pose_speed_radps`,
+default 0.4 rad/s) — the operator isn't steering, so it has to be slow
+enough to watch and stop. They pass the load monitor and joint limits,
+but **not** the workspace fence: a pose is a joint-space target that
+was taught by physically placing the arm there, so teach poses inside
+the reachable workspace and clear of obstacles.
+
+When the arm is within 10° (all joints) of a taught pose, the HUD shows
+`POSE: <name>`. **Re-teach poses after any recalibration** — calibration
+shifts the zero pose, so old angles point somewhere else.
+
+## Notes field (video overlay)
+
+Under the mode/xyz lines, colored by urgency:
+
+| Color | Meaning |
+|---|---|
+| 🔴 Red | Act now — load guard tripped, `FORCE HIGH` (a servo straining), or a pose move running |
+| 🟠 Amber | Something is limiting motion — workspace fence, joint limit, or the pose menu header |
+| 🟢 Green | Information — the pose list, and `POSE: <name>` |
+
+`FORCE HIGH` fires above `arm.load_warn_threshold` (0.675 by default,
+i.e. 75% of the 0.9 stop threshold) and names the straining joints plus
+the peak load, so you see a servo working hard *before* the guard stops
+the arm.
 
 **Shoulder pan and lift bypass the workspace fence** (used in SHOULDER
 and ELBOW modes) — deliberate operator decision (2026-07-26): the

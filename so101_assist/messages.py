@@ -77,6 +77,28 @@ class JogMode(Enum):
     WRIST = auto()         # z via side sip/puff + wrist flex/roll
 
 
+class PoseAction(Enum):
+    """Operator intent in the named-pose menu.
+
+    Deliberately separate from JogMode: entering the menu is not a jog
+    mode, it suspends jogging entirely. Keeping it a distinct message
+    means an input device that can't reach the menu (or a consumer that
+    ignores it) still drives the arm normally.
+    """
+    ENTER = auto()     # open the menu (jogging suspends)
+    CYCLE = auto()     # move the selection by `delta`
+    SELECT = auto()    # confirm — this is what authorizes motion
+    CANCEL = auto()    # leave the menu, or abort a move in progress
+
+
+@dataclass
+class PoseEvent:
+    """One operator action on the pose menu."""
+    action: PoseAction
+    delta: int = 0                 # CYCLE only: -1 up the list, +1 down
+    stamp: float = field(default_factory=now)
+
+
 @dataclass
 class JogCommand:
     """Normalized operator input, device-agnostic.

@@ -20,9 +20,16 @@ Key design constraints:
   every published JogCommand; the UI/voice layers own the eventual
   audible announcement).
 - the CENTER tube is the gripper channel in EVERY mode (puff = open,
-  sip = close) so grasping never requires a mode switch; the SIDE
-  tubes (left/right, either one) carry the mode-specific breath
-  signal (z in WRIST mode).
+  sip = close) so grasping never requires a mode switch.
+- the LEFT tube carries the mode-specific breath signal (z in WRIST
+  mode). The RIGHT tube is the POSE MENU channel: puff opens the menu,
+  sip leaves it (or aborts a move in progress).
+
+  The two side tubes used to be interchangeable for the z channel.
+  Splitting them is what buys a pose menu without stealing a control
+  the operator already relies on, and it gives the menu a dedicated
+  abort that is reachable while the arm is moving under its own power
+  — worth more than a redundant second z tube.
 - breath is NEVER a safety-critical action since it can be noisy or
   accidental; "stop" stays on voice (this driver never publishes
   anything that halts the arm).
@@ -39,9 +46,10 @@ profile) on 2026-07-25:
   is a distinct button:
   sip-left=4, sip-center=0, sip-right=5,
   puff-left=6, puff-center=2, puff-right=7.
-  Center buttons (0/2) form the gripper channel; left+right buttons
-  (4/5 and 6/7, either tube counts) form the side channel.
-- lip switch (mode-cycle) = button 1.
+  Center buttons (0/2) form the gripper channel; LEFT buttons (4/6)
+  form the side channel; RIGHT buttons (5/7) drive the pose menu.
+- lip switch = button 1: cycles jog mode normally, confirms the
+  highlighted pose while the menu is open.
 
 Axis mapping (2 continuous joystick signals + the side-breath signal
 -> a 3-wide JogCommand.axes; gripper_delta always carries the
@@ -67,17 +75,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...bus import Bus
-from ...messages import JogCommand, JogMode
+from ...bus import TOPIC_POSE, Bus
+from ...messages import JogCommand, JogMode, PoseAction, PoseEvent
 from .base import PygameJoystickDevice, shape_axis
 
 AXIS_X = 2
 AXIS_Y = 1
 CENTER_SIP_BUTTONS = (0,)       # gripper close
 CENTER_PUFF_BUTTONS = (2,)      # gripper open
-SIDE_SIP_BUTTONS = (4, 5)       # left, right tube — either counts
-SIDE_PUFF_BUTTONS = (6, 7)
+SIDE_SIP_BUTTONS = (4,)         # LEFT tube only — z down (see note below)
+SIDE_PUFF_BUTTONS = (6,)        # LEFT tube only — z up
 BUTTON_MODE_NEXT = 1            # lip switch
+BUTTON_POSE_ENTER = 7           # RIGHT puff — open the pose menu
+BUTTON_POSE_CANCEL = 5          # RIGHT sip  — leave the menu / abort a move
+
+# Stick deflection that counts as one menu step, and the value it must
+# fall back below before another step registers. A menu needs discrete
+# detents, not a rate: without the release threshold a held stick would
+# scroll the list continuously and the operator would overshoot.
+MENU_STEP_THRESHOLD = 0.6
+MENU_RELEASE_THRESHOLD = 0.3
 
 _MODE_ORDER = (JogMode.SHOULDER, JogMode.ELBOW, JogMode.WRIST)
 
@@ -98,6 +115,8 @@ class QuadStickDevice(PygameJoystickDevice):
         side_sip_buttons: tuple[int, ...] = SIDE_SIP_BUTTONS,
         side_puff_buttons: tuple[int, ...] = SIDE_PUFF_BUTTONS,
         button_mode_next: int = BUTTON_MODE_NEXT,
+        button_pose_enter: int = BUTTON_POSE_ENTER,
+        button_pose_cancel: int = BUTTON_POSE_CANCEL,
     ) -> None:
         super().__init__(bus, joystick_index=joystick_index, poll_hz=poll_hz)
         self.joystick_deadzone = joystick_deadzone
@@ -109,8 +128,18 @@ class QuadStickDevice(PygameJoystickDevice):
         self.side_sip_buttons = side_sip_buttons
         self.side_puff_buttons = side_puff_buttons
         self.button_mode_next = button_mode_next
+        self.button_pose_enter = button_pose_enter
+        self.button_pose_cancel = button_pose_cancel
         self.mode = JogMode.SHOULDER
         self._prev_mode_button = False
+        # Pose-menu state. `pose_menu_open` gates jogging: while the
+        # menu is up the stick scrolls the list instead of driving the
+        # arm, so this driver publishes ZERO axes and zero gripper —
+        # the operator can never move the arm by browsing poses.
+        self.pose_menu_open = False
+        self._prev_pose_enter = False
+        self._prev_pose_cancel = False
+        self._menu_detent_armed = True
 
     @classmethod
     def from_config(cls, bus: Bus, operator_cfg: dict) -> QuadStickDevice:
@@ -127,9 +156,24 @@ class QuadStickDevice(PygameJoystickDevice):
             side_sip_buttons=tuple(qs_cfg.get("side_sip_buttons", SIDE_SIP_BUTTONS)),
             side_puff_buttons=tuple(qs_cfg.get("side_puff_buttons", SIDE_PUFF_BUTTONS)),
             button_mode_next=qs_cfg.get("button_mode_next", BUTTON_MODE_NEXT),
+            button_pose_enter=qs_cfg.get("button_pose_enter", BUTTON_POSE_ENTER),
+            button_pose_cancel=qs_cfg.get("button_pose_cancel", BUTTON_POSE_CANCEL),
         )
 
     def _read_jog(self, joystick) -> JogCommand:
+        # Menu handling first: it decides whether this tick jogs at all.
+        # Publishing pose events from here (rather than from a second
+        # poll loop) keeps them edge-aligned with the jog they suppress,
+        # so there is no tick where the menu is open AND the stick still
+        # commands motion.
+        self._poll_pose_menu(joystick)
+
+        if self.pose_menu_open:
+            # Browsing is not driving: no axes, no gripper. The mode is
+            # still reported so the HUD keeps showing where jogging will
+            # resume when the menu closes.
+            return JogCommand(axes=np.zeros(3), mode=self.mode, gripper_delta=0.0)
+
         x = shape_axis(joystick.get_axis(self.axis_x), self.joystick_deadzone, self.expo)
         y = shape_axis(joystick.get_axis(self.axis_y), self.joystick_deadzone, self.expo)
         center = self._breath(joystick, self.center_sip_buttons, self.center_puff_buttons)
@@ -145,6 +189,49 @@ class QuadStickDevice(PygameJoystickDevice):
 
         # Center breath -> gripper in every mode (see module docstring).
         return JogCommand(axes=axes, mode=self.mode, gripper_delta=center)
+
+    def _poll_pose_menu(self, joystick) -> None:
+        """Right puff opens the menu, right sip leaves it, the stick
+        scrolls it, the lip switch confirms. All edge-triggered — a held
+        breath or a held stick must not repeat."""
+        enter = bool(joystick.get_button(self.button_pose_enter))
+        cancel = bool(joystick.get_button(self.button_pose_cancel))
+
+        # CANCEL is published even when the menu is closed: that is the
+        # operator's abort for a move already running, which by then has
+        # closed the menu.
+        if cancel and not self._prev_pose_cancel:
+            self.pose_menu_open = False
+            self.bus.publish(TOPIC_POSE, PoseEvent(action=PoseAction.CANCEL))
+        elif enter and not self._prev_pose_enter and not self.pose_menu_open:
+            self.pose_menu_open = True
+            self._menu_detent_armed = True
+            self.bus.publish(TOPIC_POSE, PoseEvent(action=PoseAction.ENTER))
+
+        self._prev_pose_enter = enter
+        self._prev_pose_cancel = cancel
+
+        if not self.pose_menu_open:
+            return
+
+        # Raw axis (not shaped): the expo curve is for velocity feel and
+        # has no meaning for a discrete menu step.
+        y = joystick.get_axis(self.axis_y)
+        if abs(y) < MENU_RELEASE_THRESHOLD:
+            self._menu_detent_armed = True
+        elif self._menu_detent_armed and abs(y) >= MENU_STEP_THRESHOLD:
+            self._menu_detent_armed = False
+            # Stick up reads negative on this unit; up moves up the list.
+            self.bus.publish(TOPIC_POSE, PoseEvent(action=PoseAction.CYCLE, delta=1 if y > 0 else -1))
+
+        pressed = bool(joystick.get_button(self.button_mode_next))
+        if pressed and not self._prev_mode_button:
+            # Lip switch confirms instead of cycling jog mode while the
+            # menu is open. Closing the menu here means the abort that
+            # follows (right sip) applies to the MOVE, not the menu.
+            self.pose_menu_open = False
+            self.bus.publish(TOPIC_POSE, PoseEvent(action=PoseAction.SELECT))
+        self._prev_mode_button = pressed
 
     @staticmethod
     def _breath(joystick, sip_buttons: tuple[int, ...], puff_buttons: tuple[int, ...]) -> float:

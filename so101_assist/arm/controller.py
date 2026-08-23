@@ -231,3 +231,57 @@ class CartesianController:
 
         self.driver.write_joint_targets(q_setpoint, gripper_setpoint)
         return True
+
+    def step_to_joints(
+        self,
+        target_rad: np.ndarray,
+        target_gripper: float,
+        max_step_rad: float,
+        max_gripper_step: float,
+    ) -> bool:
+        """Drive one bounded step toward a joint-space target. Returns
+        True once the arm has arrived.
+
+        This is the pose-move primitive, deliberately routed through the
+        controller rather than straight to the driver so an autonomous
+        move keeps the same protections a jogged one has: the load
+        monitor still trips on a collision, a STOP still holds, joint
+        limits still clip, and last_* stay fresh for the HUD.
+
+        The workspace fence is NOT applied — it constrains Cartesian
+        velocity, and a pose is a joint-space target that was taught by
+        physically placing the arm there. Poses must be taught inside
+        the reachable workspace; teaching one through an obstacle would
+        drive through it.
+
+        Raises RuntimeError if called while stopped — resuming is an
+        explicit operator action, never a side effect of a pose move.
+        """
+        joint_pos, joint_load, gripper_pos = self.driver.read_state()
+        self.last_ee_xyz = fk(joint_pos)[:3, 3]
+        self.last_joint_pos = joint_pos
+        self.last_joint_load = joint_load
+
+        if self.load_monitor is not None and self.load_monitor.feed(joint_load):
+            self.stopped = True
+        if self.stopped:
+            raise RuntimeError("Arm is stopped — pose move aborted.")
+
+        target = np.array(
+            [np.clip(q, *self.joint_limits[name]) for name, q in zip(JOINT_NAMES, target_rad)]
+        )
+        delta = target - joint_pos
+        arrived = bool(np.max(np.abs(delta)) <= max_step_rad)
+        next_q = target if arrived else joint_pos + np.clip(delta, -max_step_rad, max_step_rad)
+
+        gripper_delta = float(np.clip(target_gripper - gripper_pos, -max_gripper_step, max_gripper_step))
+        next_gripper = float(np.clip(gripper_pos + gripper_delta, 0.0, 1.0))
+
+        # Keep the jog setpoints in step with where the pose move left
+        # the arm, so resuming the stick afterwards doesn't snap back to
+        # a setpoint from before the move.
+        self._q_setpoint = next_q.copy()
+        self._gripper_setpoint = next_gripper
+
+        self.driver.write_joint_targets(next_q, next_gripper)
+        return arrived

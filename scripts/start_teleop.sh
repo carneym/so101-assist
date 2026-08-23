@@ -134,6 +134,15 @@ else
   ok "calibration present — skipping (use --recalibrate to redo)"
 fi
 
+# 4b ── taught poses (optional) ----------------------------------------
+POSE_COUNT="$("$PY" -c 'from so101_assist.arm.poses import load_poses; print(len(load_poses()))' 2>/dev/null || echo 0)"
+if [[ "$POSE_COUNT" -gt 0 ]]; then
+  ok "$POSE_COUNT taught pose(s) — right puff opens the menu"
+else
+  warn "No poses taught (optional). Teach HOME/RAISED/EXTENDED with:"
+  warn "    $PY scripts/teach_pose.py --port $PORT"
+fi
+
 # 5 ── QuadStick -------------------------------------------------------
 JOYSTICKS="$(SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$PY" - <<'EOF' 2>/dev/null
 import contextlib, io, os
