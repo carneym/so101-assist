@@ -350,7 +350,6 @@ def run(
         print(f"[detect] object detection running on '{camera}' at {detector_node.detect_hz} Hz.")
     print("QuadStick connected. Lip switch cycles mode; Ctrl-C stops and releases torque.")
     input("Workspace clear? Press ENTER to enable torque and start teleop...")
-    driver.enable_torque()
 
     cv2 = None
     if cam_sub is not None:
@@ -367,6 +366,12 @@ def run(
     shown_fence_blocks: list[str] = []
     shown_limit_clips: list[str] = []
     try:
+        # INSIDE the try: enable_torque writes two registers per motor
+        # and can fail partway through, leaving earlier motors powered.
+        # Outside, that partial enable escaped the finally below and the
+        # script exited with the arm still energized.
+        driver.enable_torque()
+
         while True:
             tick_start = time.monotonic()
 

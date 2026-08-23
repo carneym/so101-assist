@@ -172,8 +172,16 @@ class SO101Driver:
         Safe on its own: a servo holds its CURRENT position when torque
         is enabled, it doesn't jump anywhere. Nothing moves until
         write_joint_targets() is also called.
+
+        Retries like read_state and torque_off do: this writes two
+        registers per motor across twelve round trips, and a single
+        dropped status packet (USB/serial noise) would otherwise abort
+        the whole call PARTWAY THROUGH — leaving some motors powered and
+        the rest limp, which reads to the operator as a dead arm while
+        it is in fact energized. Callers must still release torque if
+        this raises; a partial enable is not a no-op.
         """
-        self.bus.enable_torque()
+        self.bus.enable_torque(num_retry=READ_NUM_RETRIES)
 
     def set_torque_limit(self, fraction: float, motors: list[str] | None = None) -> None:
         """Set the runtime torque cap (0..1 of rated) on the given motors

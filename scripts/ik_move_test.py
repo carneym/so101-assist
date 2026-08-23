@@ -90,8 +90,11 @@ def run(port: str, axis: str, delta_cm: float, max_joint_jump_deg: float) -> Non
     print(f"IK residual: {np.linalg.norm(achieved - target_xyz) * 1000:.2f} mm")
     input("Workspace clear? Press ENTER to enable torque and move, Ctrl-C to abort...")
 
-    driver.enable_torque()
     try:
+        # Inside the try: a partial enable_torque (it can fail
+        # midway, leaving earlier motors powered) must still hit
+        # the torque_off below.
+        driver.enable_torque()
         print("moving to target...")
         move_to(driver, target_q, start_gripper)
         end_xyz = fk(driver.read_state()[0])[:3, 3]

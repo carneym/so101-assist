@@ -110,8 +110,11 @@ def run(
 
     input("Workspace clear? Press ENTER to enable torque and move, Ctrl-C to abort...")
 
-    driver.enable_torque()
     try:
+        # Inside the try: a partial enable_torque (it can fail
+        # midway, leaving earlier motors powered) must still hit
+        # the torque_off below.
+        driver.enable_torque()
         print("moving out...")
         move_to(driver, target_pos, target_gripper, verbose)
         time.sleep(0.5)

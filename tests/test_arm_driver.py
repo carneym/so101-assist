@@ -135,9 +135,21 @@ def test_write_joint_targets_clamps_gripper_to_unit_range(calibrated_driver: SO1
 
 def test_enable_torque_delegates_to_bus(driver: SO101Driver, monkeypatch):
     called = []
-    monkeypatch.setattr(driver.bus, "enable_torque", lambda: called.append(True))
+    monkeypatch.setattr(driver.bus, "enable_torque", lambda **kw: called.append(kw))
     driver.enable_torque()
-    assert called == [True]
+    assert len(called) == 1
+
+
+def test_enable_torque_retries_dropped_packets(driver: SO101Driver, monkeypatch):
+    """It writes two registers per motor over a dozen round trips. With
+    no retries one noisy packet aborts it PARTWAY, leaving some motors
+    powered and the rest limp — an arm that looks dead but isn't."""
+    called = []
+    monkeypatch.setattr(driver.bus, "enable_torque", lambda **kw: called.append(kw))
+
+    driver.enable_torque()
+
+    assert called[0]["num_retry"] > 0
 
 
 def test_set_torque_limit_writes_scaled_value_to_selected_motors(driver: SO101Driver, monkeypatch):
