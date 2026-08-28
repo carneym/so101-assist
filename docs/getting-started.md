@@ -10,23 +10,66 @@ inline where they differ.
 Each step builds on the last and is safe to stop at — nothing moves the
 arm under power until Step 7.
 
-> ## Already set this machine up once?
->
-> Skip everything below. Boot the Pi, plug in the arm and QuadStick, and:
->
+## Quick start (Linux / Raspberry Pi)
+
+Already set this machine up? Boot the Pi, plug in the arm and the
+QuadStick, then:
+
+```bash
+cd ~/Projects/so101-assist && source .venv/bin/activate
+```
+
+Your prompt should now start with `(.venv)`. **Every terminal needs
+this** — `ModuleNotFoundError: No module named 'so101_assist'` always
+means it's missing from that terminal.
+
+Then drive, either via the launcher (recommended — it auto-detects the
+port, pings the servos, reuses your calibration, and checks the
+QuadStick before starting):
+
+```bash
+./scripts/start_teleop.sh
+```
+
+or by running teleop directly:
+
+```bash
+python scripts/quadstick_teleop.py --port /dev/ttyACM0
+```
+
+<sub>Not sure of the port? `ls /dev/ttyACM*`. Type it exactly — a trailing slash gives "Not a directory".</sub>
+
+### Everything else you'll want
+
+| Task | Command |
+|---|---|
+| Preflight only, don't drive | `./scripts/start_teleop.sh --check` |
+| Drive with no video window | `./scripts/start_teleop.sh --no-camera` |
+| List the serial ports | `python scripts/arm_test.py --list-only` |
+| Check the arm responds (read-only) | `python scripts/arm_test.py --port /dev/ttyACM0` |
+| Re-calibrate the arm | `python scripts/calibrate_arm.py --port /dev/ttyACM0` |
+| Teach the standard poses | `python scripts/teach_pose.py --port /dev/ttyACM0` |
+| Record a path to one pose | `python scripts/teach_pose.py --port /dev/ttyACM0 --record --name STOW` |
+| Record a gesture | `python scripts/teach_pose.py --port /dev/ttyACM0 --gesture --name WAVE` |
+| List what's taught | `python scripts/teach_pose.py --list` |
+| Live tuning sliders (2nd terminal) | `python scripts/tuning_gui.py` |
+| Run the tests | `pytest -q` |
+
+**Driving:** lip switch cycles SHOULDER → ELBOW → WRIST · centre
+sip/puff works the gripper in every mode · left tube is z in WRIST mode
+· **right puff opens the pose menu** (stick up/down chooses, lip switch
+goes, right sip aborts) · `Ctrl-C` or `q` in the video window stops and
+releases torque. Full map in [controls.md](controls.md).
+
+> **Release a stuck arm.** If a crash ever leaves the arm powered and
+> holding:
 > ```bash
-> ./scripts/start_teleop.sh
+> python -c "from so101_assist.arm.driver import SO101Driver; d=SO101Driver(port='/dev/ttyACM0'); d.connect(); d.torque_off(); d.disconnect()"
 > ```
->
-> It activates the venv, auto-detects the serial port, pings the servos,
-> reuses your existing calibration (only calibrating if one is missing or
-> incomplete), checks the QuadStick, and launches teleop. Add
-> `--recalibrate` to force a fresh calibration, `--check` to run the
-> preflight without driving, or `--help` for the rest. Any other flags
-> pass straight through to teleop (`--no-camera`, `--debug`).
->
-> The steps below are the first-time setup, and the reference for when
-> something goes wrong.
+> If even that can't reach it, cut power at the arm's supply.
+
+The rest of this page is the first-time setup, and the reference for
+when something goes wrong.
 
 ## What you need
 
