@@ -1,6 +1,14 @@
-"""QuadStick teleop — drive the SO-101 with the QuadStick, end to end.
+"""Teleop — drive the SO-101 with the QuadStick, or the keyboard.
 
-Wires QuadStickDevice (pygame joystick -> JogCommand on the bus)
+--input selects the operator device: `auto` (default) uses the
+QuadStick when one is plugged in and otherwise falls back to KEYBOARD
+control, so an unplugged QuadStick leaves you with a usable arm instead
+of a crash. Force either with `--input quadstick` / `--input keyboard`.
+Both publish the same messages, so modes, the gripper channel, the pose
+menu and every safety layer behave identically — see
+so101_assist/control/inputs/keyboard.py for the key map.
+
+Wires the input device (-> JogCommand on the bus)
 through CartesianController (velocity caps, workspace fence, load
 monitor) to the arm. The QuadStick must be in its Joystick profile
 (see so101_assist/control/inputs/quadstick.py) and the arm calibrated
@@ -72,6 +80,8 @@ from so101_assist.arm.trajectory import (
     speed_scale_for_cap,
 )
 from so101_assist.bus import TOPIC_DETECTIONS, TOPIC_JOG, TOPIC_POSE, Bus
+from so101_assist.control.inputs.keyboard import KeyboardDevice
+from so101_assist.control.inputs.keyboard import help_text as keyboard_help
 from so101_assist.control.inputs.quadstick import QuadStickDevice
 from so101_assist.control.pose_menu import PoseMenu
 from so101_assist.control.tuning import DEFAULT_TUNING_PATH, write_status
@@ -146,6 +156,46 @@ def make_player(pose: Pose, current_joints) -> TrajectoryPlayer | None:
         speed=speed,
         repeats=GESTURE_REPEATS if (pose.is_gesture and pose.loop) else 1,
     )
+
+
+def joystick_present() -> bool:
+    """Whether SDL can see any joystick.
+
+    Any failure here (pygame missing, no SDL video driver, no permission
+    on /dev/input) means the same thing to the caller: no usable
+    joystick, fall back to the keyboard. Reporting False is the useful
+    response — this is a probe, not the place to surface the reason.
+    """
+    import io
+    import os
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            import pygame
+
+            pygame.init()
+            pygame.joystick.init()
+            return pygame.joystick.get_count() > 0
+    except (ImportError, RuntimeError, OSError):
+        return False
+
+
+def build_input(bus, operator_cfg: dict, choice: str):
+    """Pick the operator input device.
+
+    'auto' prefers the QuadStick and falls back to the keyboard, so an
+    unplugged QuadStick degrades to a usable arm instead of a crash —
+    which is most of the point of having a keyboard driver at all.
+    """
+    if choice == "keyboard":
+        return KeyboardDevice.from_config(bus, operator_cfg), "keyboard"
+    if choice == "quadstick":
+        return QuadStickDevice.from_config(bus, operator_cfg), "quadstick"
+    if joystick_present():
+        return QuadStickDevice.from_config(bus, operator_cfg), "quadstick"
+    print("[input] no joystick detected — falling back to KEYBOARD control.")
+    return KeyboardDevice.from_config(bus, operator_cfg), "keyboard"
 
 
 def print_pose_menu(menu: PoseMenu) -> None:
@@ -307,6 +357,7 @@ def run(
     debug: bool = False,
     camera: str | None = "wrist",
     detect: bool = False,
+    input_choice: str = "auto",
 ) -> None:
     cfg = yaml.safe_load(config_path.read_text())
     load_warn_threshold = resolve_load_warn(cfg["arm"])
@@ -339,7 +390,7 @@ def run(
     # tick — see Subscription.drain. Sized to hold a tick's worth.
     pose_sub = bus.subscribe(TOPIC_POSE, maxsize=32)
     menu = PoseMenu(poses)
-    quadstick = QuadStickDevice.from_config(bus, cfg["operator"])
+    quadstick, input_kind = build_input(bus, cfg["operator"], input_choice)
 
     cam_node = None
     cam_sub = None
@@ -389,15 +440,23 @@ def run(
     if tuning_path.exists():
         print(f"[tuning] applied override from {tuning_path}")
 
-    quadstick.start()   # daemon thread publishing JogCommand at 60 Hz
     if cam_node is not None:
         cam_node.start()   # daemon thread publishing frames; window appears once frames arrive
         print(f"Wrist camera '{camera}' starting — video window opens shortly. Press q to stop.")
     if detector_node is not None:
         detector_node.start()
         print(f"[detect] object detection running on '{camera}' at {detector_node.detect_hz} Hz.")
-    print("QuadStick connected. Lip switch cycles mode; Ctrl-C stops and releases torque.")
+    if input_kind == "keyboard":
+        print("\n" + keyboard_help())
+        print("\nKeep THIS terminal focused — keys are read from it.")
+    else:
+        print("QuadStick connected. Lip switch cycles mode; Ctrl-C stops and releases torque.")
     input("Workspace clear? Press ENTER to enable torque and start teleop...")
+
+    # Started only now, after the prompt above has had its ENTER: the
+    # keyboard driver puts the terminal in cbreak mode and consumes
+    # stdin, so a reader running during input() would swallow it.
+    quadstick.start()   # daemon thread publishing JogCommand at 60 Hz
 
     cv2 = None
     if cam_sub is not None:
@@ -428,6 +487,10 @@ def run(
 
         while True:
             tick_start = time.monotonic()
+
+            if getattr(quadstick, "quit_requested", False):
+                print("\nstopping (q)...")
+                break
 
             for event in pose_sub.drain():
                 was_open, was_moving = menu.open, menu.moving
@@ -680,6 +743,10 @@ def main() -> None:
         help="deadman: zero velocity if no fresh jog input within this many seconds",
     )
     parser.add_argument(
+        "--input", choices=("auto", "quadstick", "keyboard"), default="auto",
+        help="operator input device. auto = QuadStick if one is plugged in, else keyboard.",
+    )
+    parser.add_argument(
         "--debug", action="store_true",
         help="print jog input, mapped command, and joint state ~3x/sec",
     )
@@ -696,7 +763,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     camera = None if args.no_camera else args.camera
-    run(args.port, args.config, args.stale_s, args.debug, camera, args.detect)
+    run(
+        args.port, args.config, args.stale_s, args.debug, camera, args.detect,
+        input_choice=args.input,
+    )
 
 
 if __name__ == "__main__":

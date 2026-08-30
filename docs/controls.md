@@ -44,6 +44,35 @@ cheat-sheet (controls, limits, caps) to the console.
 | **WRIST** | Stick left/right | Wrist roll | ❌ (small motion) | −157°…+163° (URDF) | 0.5 rad/s (`max_wrist_radps`) |
 | **WRIST** | Stick up/down | Wrist flex | ❌ (small motion) | ±95° (URDF) | 0.5 rad/s (`max_wrist_radps`) |
 
+## Keyboard controls (no QuadStick)
+
+Teleop falls back to the keyboard automatically when no joystick is
+plugged in; force it either way with `--input keyboard` / `--input
+quadstick`. Keys are read from the **terminal running teleop**, which
+must stay focused — it works headless over SSH and with `--no-camera`.
+
+| Key | Effect | QuadStick equivalent |
+|---|---|---|
+| `w` / `s` | up / down (mode-dependent) | stick up/down |
+| `a` / `d` | left / right (shoulder pan) | stick left/right |
+| `r` / `f` | z up / down (WRIST mode) | left tube puff / sip |
+| `o` / `c` | gripper open / close, every mode | centre puff / sip |
+| `m` | next mode: SHOULDER → ELBOW → WRIST | lip switch |
+| `p` | open the pose menu | right puff |
+| `w` / `s`, `ENTER` | choose / go, in the menu | stick, lip switch |
+| `x` | exit the menu, or abort a pose move | right sip |
+| `q` | stop and release torque | — |
+
+> **Jogging feels different here, unavoidably.** A terminal reports key
+> presses but never releases, so a key counts as held until
+> `key_hold_s` (0.25 s) passes without a repeat. Holding therefore
+> stutters until the OS auto-repeat starts, and there is up to 0.25 s of
+> coast after you let go — about 6° at the shoulder cap. Tap for small
+> corrections. On X11, `xset r rate 200 30` makes holds much smoother.
+
+This is a bring-up and fallback input. The QuadStick remains the
+interface the system is designed around.
+
 ## Named poses
 
 Taught with `scripts/teach_pose.py` (arm limp, positioned by hand) and

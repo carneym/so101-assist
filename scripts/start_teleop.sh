@@ -160,9 +160,10 @@ EOF
 if [[ -n "$JOYSTICKS" ]]; then
   ok "joystick: ${JOYSTICKS%%|*}"
 else
-  warn "No joystick detected. Plug in the QuadStick and set its"
-  warn "QuadStick Configurator profile to Joystick/Gamepad (NOT Mouse mode)."
-  warn "Teleop will fail to start without it."
+  warn "No joystick detected — teleop will fall back to KEYBOARD control."
+  warn "For the QuadStick: plug it in and set its QuadStick Configurator"
+  warn "profile to Joystick/Gamepad (NOT Mouse mode), then re-run."
+  warn "To use the keyboard deliberately, pass:  --input keyboard"
 fi
 
 # 6 ── display ---------------------------------------------------------

@@ -45,6 +45,7 @@ python scripts/quadstick_teleop.py --port /dev/ttyACM0
 |---|---|
 | Preflight only, don't drive | `./scripts/start_teleop.sh --check` |
 | Drive with no video window | `./scripts/start_teleop.sh --no-camera` |
+| Drive with the keyboard (no QuadStick) | `./scripts/start_teleop.sh --input keyboard` |
 | List the serial ports | `python scripts/arm_test.py --list-only` |
 | Check the arm responds (read-only) | `python scripts/arm_test.py --port /dev/ttyACM0` |
 | Re-calibrate the arm | `python scripts/calibrate_arm.py --port /dev/ttyACM0` |
@@ -54,6 +55,11 @@ python scripts/quadstick_teleop.py --port /dev/ttyACM0
 | List what's taught | `python scripts/teach_pose.py --list` |
 | Live tuning sliders (2nd terminal) | `python scripts/tuning_gui.py` |
 | Run the tests | `pytest -q` |
+
+**No QuadStick?** Teleop falls back to keyboard control automatically —
+`w`/`a`/`s`/`d` to jog, `o`/`c` for the gripper, `m` for mode, `p` for
+the pose menu, `q` to stop. Full map in
+[controls.md](controls.md#keyboard-controls-no-quadstick).
 
 **Driving:** lip switch cycles SHOULDER → ELBOW → WRIST · centre
 sip/puff works the gripper in every mode · left tube is z in WRIST mode
