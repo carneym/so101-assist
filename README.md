@@ -69,6 +69,7 @@ policy, with the forward pass running on a Modal GPU.
 
 ```bash
 pip install "modal>=1.5" "lerobot[feetech]>=0.6" opencv-python pyyaml
+python soarm-test.py --preview            # check camera aim (no Modal, no arm)
 modal setup && export HF_TOKEN=...        # the PaliGemma tokenizer repo is gated
 modal run soarm-test.py --dry-run         # full loop, no motion
 modal run soarm-test.py --task "pick up the glasses"

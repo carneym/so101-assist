@@ -16,3 +16,4 @@ config/arm_status.json
 # accidental nested git repos
 /so101-assist/
 tests/so101-assist/
+camera-preview/

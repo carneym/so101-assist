@@ -330,6 +330,101 @@ def _encode_frame(frame, max_width: int = 320) -> bytes:
     return buf.tobytes()
 
 
+def _camera_configs(cfg: dict) -> dict:
+    """Build one LeRobot camera config per entry in the config's `cameras:` block.
+
+    Insertion order matters downstream: π₀.₅ assigns images to camera *slots* by
+    position, so the first camera here becomes the model's third-person "base" view and
+    the rest become wrist views.
+    """
+    from lerobot.cameras.opencv import OpenCVCameraConfig
+
+    # lerobot defaults to the ANY backend, which on Windows means MSMF — slow to probe
+    # and it enumerates devices differently than DirectShow. so101_assist's own capture
+    # path (perception/camera.py) forces DSHOW there, so match it: otherwise the indices
+    # you confirmed with scripts/camera_test.py may not be the ones opened here.
+    extra = {}
+    if sys.platform == "win32":
+        try:
+            from lerobot.cameras import Cv2Backends
+
+            extra["backend"] = Cv2Backends.DSHOW
+        except ImportError:  # older lerobot without the backend selector
+            pass
+
+    cameras = {
+        name: OpenCVCameraConfig(
+            index_or_path=spec["index"], width=spec["width"], height=spec["height"], fps=spec["fps"], **extra
+        )
+        for name, spec in cfg.get("cameras", {}).items()
+    }
+    if not cameras:
+        raise SystemExit("No cameras in config/default.yaml — π₀.₅ needs at least one image stream.")
+    return cameras
+
+
+def _model_view(frame, size: int = 224):
+    """Reproduce exactly what π₀.₅ sees, so you can look at it before trusting it.
+
+    Mirrors lerobot's `resize_with_pad_torch`: scale by max(w, h) / 224 so nothing is
+    cropped, then centre-pad the short axis with black. Returns the 224x224 image and
+    the (width, height) actually filled by real pixels.
+    """
+    import cv2
+    import numpy as np
+
+    h, w = frame.shape[:2]
+    ratio = max(w / size, h / size)
+    rw, rh = int(w / ratio), int(h / ratio)  # int(), not round() — matches lerobot
+    resized = cv2.resize(frame, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    pad_h = (size - rh) // 2
+    pad_w = (size - rw) // 2
+    out = np.zeros((size, size, 3), dtype=frame.dtype)
+    out[pad_h:pad_h + rh, pad_w:pad_w + rw] = resized
+    return out, (rw, rh)
+
+
+def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview") -> None:
+    """Grab one frame per camera and write both the raw frame and the model's-eye view.
+
+    Runs standalone (`python soarm-test.py --preview`) — no Modal account, no GPU, and
+    the arm is never touched. Use it to aim the cameras before a real run.
+    """
+    import cv2
+
+    from lerobot.cameras.opencv import OpenCVCamera
+
+    cfg = _load_yaml(REPO_ROOT / config)
+    out = REPO_ROOT / out_dir
+    out.mkdir(parents=True, exist_ok=True)
+
+    for slot, (name, cam_cfg) in enumerate(_camera_configs(cfg).items()):
+        role = "base / third-person" if slot == 0 else "wrist"
+        print(f"\n[{name}] index {cam_cfg.index_or_path} -> policy slot {slot} ({role})")
+        camera = OpenCVCamera(cam_cfg)
+        try:
+            camera.connect()
+            frame = camera.read()  # RGB, as lerobot hands it to the policy
+        except Exception as exc:
+            print(f"  FAILED to open: {exc}")
+            continue
+        finally:
+            if camera.is_connected:
+                camera.disconnect()
+
+        h, w = frame.shape[:2]
+        view, (rw, rh) = _model_view(frame)
+        used = (rw * rh) / (224 * 224)
+        print(f"  captured {w}x{h}  ->  {rw}x{rh} inside a 224x224 frame "
+              f"({used:.0%} real pixels, {1 - used:.0%} black padding)")
+        if used < 0.7:
+            print("  ! a lot of the model's input is padding — a 4:3 or square mode would use more of it")
+
+        for suffix, image in ((f"{name}_raw.png", frame), (f"{name}_model_view.png", view)):
+            cv2.imwrite(str(out / suffix), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    print(f"\nwrote to {out}/ — open the *_model_view.png files: that is all π₀.₅ gets to see.")
+
+
 def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relative_target: float):
     """Construct the LeRobot SO101Follower from config/default.yaml + our calibration."""
     # lerobot >= 0.6 moved the SO-100/SO-101 followers into a shared module.
@@ -337,16 +432,8 @@ def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relat
         from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
     except ImportError:  # lerobot <= 0.5
         from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
-    from lerobot.cameras.opencv import OpenCVCameraConfig
 
-    cameras = {
-        name: OpenCVCameraConfig(
-            index_or_path=spec["index"], width=spec["width"], height=spec["height"], fps=spec["fps"]
-        )
-        for name, spec in cfg.get("cameras", {}).items()
-    }
-    if not cameras:
-        raise SystemExit("No cameras in config/default.yaml — π₀.₅ needs at least one image stream.")
+    cameras = _camera_configs(cfg)
 
     robot_cfg = SO101FollowerConfig(
         port=port,
@@ -508,7 +595,20 @@ def main(
 
 
 if __name__ == "__main__":
-    sys.exit(
-        "Run this with Modal so the policy gets a GPU:\n"
-        '    modal run soarm-test.py --task "pick up the glasses"'
-    )
+    # `modal run` never reaches this branch; it calls main() above. Running the file with
+    # plain python is reserved for --preview, which needs neither Modal nor the arm.
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preview", action="store_true", help="save what each camera sees, and what the model sees")
+    parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--out-dir", default="camera-preview")
+    args = parser.parse_args()
+    if not args.preview:
+        sys.exit(
+            "Run this with Modal so the policy gets a GPU:\n"
+            '    modal run soarm-test.py --task "pick up the glasses"\n'
+            "Or check your cameras first, without Modal or the arm:\n"
+            "    python soarm-test.py --preview"
+        )
+    preview(config=args.config, out_dir=args.out_dir)
