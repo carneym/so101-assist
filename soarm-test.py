@@ -381,6 +381,90 @@ def _camera_configs(cfg: dict) -> dict:
     return cameras
 
 
+def _v4l2_nodes(sysfs_root=Path("/sys/class/video4linux"), dev_root=Path("/dev")):
+    """Enumerate this machine's V4L2 video nodes, newest kernel naming assumed.
+
+    Returns (device_path, human_name, [stable by-id symlinks]) per node, in numeric
+    order. The human name comes from sysfs, which is what tells you *which physical
+    camera* a node belongs to — the thing an index can never tell you.
+    """
+    if not sysfs_root.is_dir():
+        return []
+
+    # Reverse /dev/v4l/by-id/* -> the /dev/videoN each symlink resolves to.
+    by_id: dict[Path, list[Path]] = {}
+    by_id_dir = dev_root / "v4l" / "by-id"
+    if by_id_dir.is_dir():
+        for link in sorted(by_id_dir.iterdir()):
+            by_id.setdefault(link.resolve(), []).append(link)
+
+    def node_number(path: Path) -> int:
+        try:
+            return int(path.name.removeprefix("video"))
+        except ValueError:
+            return 1 << 30  # unparseable names sort last rather than crashing
+
+    nodes = []
+    for entry in sorted(sysfs_root.glob("video*"), key=node_number):
+        device = dev_root / entry.name
+        try:
+            name = (entry / "name").read_text().strip()
+        except OSError:
+            name = "?"
+        nodes.append((device, name, by_id.get(device, [])))
+    return nodes
+
+
+def list_cameras() -> None:
+    """Print which physical camera sits on which node, and the config line to use.
+
+    Opens each node with the V4L2 backend *explicitly*. That matters: with OpenCV's
+    default ANY backend a refused node falls through to another backend that may return
+    frames from a different device entirely, which is exactly how a metadata node can
+    look like a working camera.
+    """
+    import cv2
+
+    nodes = _v4l2_nodes()
+    if not nodes:
+        print("No /sys/class/video4linux — this listing is Linux-only.")
+        print("Elsewhere, use `python soarm-test.py --preview` and look at the saved images.")
+        return
+
+    print("V4L2 nodes (opened with the V4L2 backend, no fallback):\n")
+    usable = []
+    for device, name, links in nodes:
+        capture = cv2.VideoCapture(str(device), cv2.CAP_V4L2)
+        ok, frame = (False, None)
+        if capture.isOpened():
+            ok, frame = capture.read()
+        capture.release()
+
+        if ok and frame is not None:
+            h, w = frame.shape[:2]
+            status = f"CAPTURE {w}x{h}"
+            usable.append((device, name, links))
+        elif capture.isOpened():
+            status = "opens but no frame (in use by another process?)"
+        else:
+            status = "not a capture device (metadata node)"
+        print(f"  {str(device):<16} {name[:34]:<36} {status}")
+        for link in links:
+            print(f"  {'':<16} stable path: {link}")
+
+    if not usable:
+        print("\nNothing captured. If the arm script or another viewer is running, stop it and retry.")
+        return
+
+    print("\nPut these under `cameras:` in config/default.yaml — ORDER IS THE POLICY SLOT:")
+    print("the first entry becomes the model's base/third-person view, the rest are wrist views.\n")
+    for role, (device, name, links) in zip(("overhead", "wrist"), usable):
+        target = links[0] if links else device
+        print(f"  {role}: {{ path: {target}, width: 640, height: 480, fps: 30 }}   # {name}")
+    if len(usable) > 2:
+        print(f"\n({len(usable)} capture devices found; the two above are just the first two.)")
+
+
 def _model_view(frame, size: int = 224):
     """Reproduce exactly what π₀.₅ sees, so you can look at it before trusting it.
 
@@ -418,7 +502,13 @@ def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview"
 
     for slot, (name, cam_cfg) in enumerate(_camera_configs(cfg).items()):
         role = "base / third-person" if slot == 0 else "wrist"
-        print(f"\n[{name}] index {cam_cfg.index_or_path} -> policy slot {slot} ({role})")
+        # Name the physical device, not just the index — an index alone cannot tell you
+        # whether you opened the camera you meant.
+        target = cam_cfg.index_or_path
+        device = Path(str(target)) if not isinstance(target, int) else Path(f"/dev/video{target}")
+        hardware = next((n for d, n, _ in _v4l2_nodes() if d == device.resolve()), None)
+        label = f"{target}" + (f"  [{hardware}]" if hardware else "")
+        print(f"\n[{name}] {label} -> policy slot {slot} ({role})")
         camera = OpenCVCamera(cam_cfg)
         try:
             camera.connect()
@@ -619,9 +709,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preview", action="store_true", help="save what each camera sees, and what the model sees")
+    parser.add_argument("--list-cameras", action="store_true", help="show which physical camera is on which device node")
     parser.add_argument("--config", default="config/default.yaml")
     parser.add_argument("--out-dir", default="camera-preview")
     args = parser.parse_args()
+    if args.list_cameras:
+        list_cameras()
+        raise SystemExit(0)
     if not args.preview:
         sys.exit(
             "Run this with Modal so the policy gets a GPU:\n"
