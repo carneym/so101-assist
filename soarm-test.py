@@ -59,7 +59,15 @@ import sys
 import time
 from pathlib import Path
 
-import modal
+try:
+    import modal
+except ModuleNotFoundError as exc:  # noqa: F841
+    # --preview needs no Modal *account* and never starts a container, but this file is
+    # a Modal app: the decorators below run at import. Fail with the fix, not a traceback.
+    raise SystemExit(
+        "soarm-test.py needs the `modal` package installed (even for --preview):\n"
+        "    pip install modal"
+    ) from exc
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -396,8 +404,8 @@ def _model_view(frame, size: int = 224):
 def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview") -> None:
     """Grab one frame per camera and write both the raw frame and the model's-eye view.
 
-    Runs standalone (`python soarm-test.py --preview`) — no Modal account, no GPU, and
-    the arm is never touched. Use it to aim the cameras before a real run.
+    Runs standalone (`python soarm-test.py --preview`) — no Modal account, no GPU, no
+    container start, and the arm is never touched. Use it to aim the cameras first.
     """
     import cv2
 
@@ -617,7 +625,7 @@ if __name__ == "__main__":
         sys.exit(
             "Run this with Modal so the policy gets a GPU:\n"
             '    modal run soarm-test.py --task "pick up the glasses"\n'
-            "Or check your cameras first, without Modal or the arm:\n"
+            "Or check your cameras first, without a GPU or the arm:\n"
             "    python soarm-test.py --preview"
         )
     preview(config=args.config, out_dir=args.out_dir)
