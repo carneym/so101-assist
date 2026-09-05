@@ -372,13 +372,72 @@ def _camera_configs(cfg: dict) -> dict:
             target = int(spec["index"])
         else:
             raise SystemExit(f"camera '{name}' needs either an `index:` or a `path:` in the config")
+        # `fourcc: MJPG` matters when two USB cameras share one controller (a Pi, say):
+        # raw YUYV at 640x480x30 is ~18 MB/s per camera and they will starve each other,
+        # while MJPG is roughly a tenth of that.
+        if spec.get("fourcc"):
+            extra_cam = {**extra, "fourcc": str(spec["fourcc"])}
+        else:
+            extra_cam = extra
         cameras[name] = OpenCVCameraConfig(
-            index_or_path=target, width=spec["width"], height=spec["height"], fps=spec["fps"], **extra
+            index_or_path=target, width=spec["width"], height=spec["height"], fps=spec["fps"], **extra_cam
         )
 
     if not cameras:
         raise SystemExit("No cameras in config/default.yaml — π₀.₅ needs at least one image stream.")
     return cameras
+
+
+# VIDIOC_QUERYCAP = _IOR('V', 0, struct v4l2_capability). The struct is 104 bytes:
+# driver[16], card[32], bus_info[32], version, capabilities, device_caps, reserved[3].
+_VIDIOC_QUERYCAP = (2 << 30) | (104 << 16) | (ord("V") << 8) | 0
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
+_V4L2_CAP_META_CAPTURE = 0x00800000
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+
+
+def _v4l2_capability(device: Path):
+    """Ask a V4L2 node what it is, without opening a stream.
+
+    Returns (driver, card, caps) or None. This is the cheap, definitive classification:
+    trying to *capture* from a node to find out what it is makes non-camera nodes (a
+    Pi's ISP and codec blocks, for instance) block for ten seconds each in select().
+    """
+    import fcntl
+    import struct
+
+    try:
+        fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        buf = bytearray(104)
+        fcntl.ioctl(fd, _VIDIOC_QUERYCAP, buf)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+    driver, card, _bus, _version, caps, device_caps = struct.unpack("<16s32s32sIII", bytes(buf[:92]))
+    # device_caps describes THIS node; capabilities describes the whole physical device
+    # (every node it owns), so a metadata node would otherwise look like a camera.
+    effective = device_caps if caps & _V4L2_CAP_DEVICE_CAPS else caps
+    decode = lambda raw: raw.split(b"\x00")[0].decode("utf-8", "replace")  # noqa: E731
+    return decode(driver), decode(card), effective
+
+
+def _classify(device: Path):
+    """(is_capture, human description) for one V4L2 node."""
+    info = _v4l2_capability(device)
+    if info is None:
+        return False, "cannot query (permission, or not a V4L2 device)"
+    driver, _card, caps = info
+    if caps & (_V4L2_CAP_VIDEO_CAPTURE | _V4L2_CAP_VIDEO_CAPTURE_MPLANE):
+        return True, f"video capture (driver: {driver})"
+    if caps & _V4L2_CAP_META_CAPTURE:
+        return False, f"metadata node (driver: {driver})"
+    return False, f"not a camera (driver: {driver})"
 
 
 def _v4l2_nodes(sysfs_root=Path("/sys/class/video4linux"), dev_root=Path("/dev")):
@@ -431,9 +490,15 @@ def list_cameras() -> None:
         print("Elsewhere, use `python soarm-test.py --preview` and look at the saved images.")
         return
 
-    print("V4L2 nodes (opened with the V4L2 backend, no fallback):\n")
+    print("V4L2 nodes (capability-checked, then opened with the V4L2 backend):\n")
     usable = []
     for device, name, links in nodes:
+        is_capture, description = _classify(device)
+        if not is_capture:
+            # Don't try to read from it: a non-camera node can block for ten seconds.
+            print(f"  {str(device):<16} {name[:34]:<36} {description}")
+            continue
+
         capture = cv2.VideoCapture(str(device), cv2.CAP_V4L2)
         ok, frame = (False, None)
         if capture.isOpened():
@@ -444,10 +509,8 @@ def list_cameras() -> None:
             h, w = frame.shape[:2]
             status = f"CAPTURE {w}x{h}"
             usable.append((device, name, links))
-        elif capture.isOpened():
-            status = "opens but no frame (in use by another process?)"
         else:
-            status = "not a capture device (metadata node)"
+            status = "capture device, but no frame (in use by another process?)"
         print(f"  {str(device):<16} {name[:34]:<36} {status}")
         for link in links:
             print(f"  {'':<16} stable path: {link}")
