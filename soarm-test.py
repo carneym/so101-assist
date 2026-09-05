@@ -427,6 +427,87 @@ def _v4l2_capability(device: Path):
     return decode(driver), decode(card), effective
 
 
+# VIDIOC_ENUM_FMT = _IOWR('V', 2, struct v4l2_fmtdesc)          -> 64 bytes
+# VIDIOC_ENUM_FRAMESIZES = _IOWR('V', 74, struct v4l2_frmsizeenum) -> 44 bytes
+_VIDIOC_ENUM_FMT = (3 << 30) | (64 << 16) | (ord("V") << 8) | 2
+_VIDIOC_ENUM_FRAMESIZES = (3 << 30) | (44 << 16) | (ord("V") << 8) | 74
+# VIDIOC_ENUM_FRAMEINTERVALS = _IOWR('V', 75, struct v4l2_frmivalenum) -> 52 bytes
+_VIDIOC_ENUM_FRAMEINTERVALS = (3 << 30) | (52 << 16) | (ord("V") << 8) | 75
+_V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
+_V4L2_FRMSIZE_TYPE_DISCRETE = 1
+_V4L2_FRMIVAL_TYPE_DISCRETE = 1
+
+
+def _frame_rates(fd: int, pixelformat: int, width: int, height: int, limit: int = 12):
+    """Discrete frame rates this format/size supports, highest first."""
+    import fcntl
+    import struct
+
+    rates = []
+    for index in range(limit):
+        buf = bytearray(52)
+        struct.pack_into("<IIII", buf, 0, index, pixelformat, width, height)
+        try:
+            fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMEINTERVALS, buf)
+        except OSError:
+            break
+        interval_type = struct.unpack_from("<I", buf, 16)[0]
+        if interval_type != _V4L2_FRMIVAL_TYPE_DISCRETE:
+            break
+        numerator, denominator = struct.unpack_from("<II", buf, 20)
+        if numerator:  # an interval of n/d seconds is d/n frames per second
+            rates.append(round(denominator / numerator))
+    return sorted(set(rates), reverse=True)
+
+
+def _v4l2_modes(device: Path, max_sizes: int = 8):
+    """What this camera can be asked for: [(fourcc, [(w, h, [fps, ...]), ...]), ...].
+
+    lerobot validates width, height AND fps on connect and raises if the camera won't
+    deliver exactly what was requested, so a working config has to name a combination
+    that appears here. The frame rate is per resolution and per pixel format: the same
+    camera will often do 30fps as MJPG and only 10fps as raw YUYV at the same size.
+    """
+    import fcntl
+    import struct
+
+    try:
+        fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return []
+
+    def fourcc_name(value: int) -> str:
+        return "".join(chr((value >> shift) & 0xFF) for shift in (0, 8, 16, 24)).strip()
+
+    formats = []
+    try:
+        for fmt_index in range(32):  # bounded: enumeration ends with EINVAL long before this
+            buf = bytearray(64)
+            struct.pack_into("<II", buf, 0, fmt_index, _V4L2_BUF_TYPE_VIDEO_CAPTURE)
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, buf)
+            except OSError:
+                break  # EINVAL = no more formats
+            pixelformat = struct.unpack_from("<I", buf, 44)[0]
+
+            sizes = []
+            for size_index in range(max_sizes):
+                sbuf = bytearray(44)
+                struct.pack_into("<II", sbuf, 0, size_index, pixelformat)
+                try:
+                    fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMESIZES, sbuf)
+                except OSError:
+                    break
+                size_type, width, height = struct.unpack_from("<III", sbuf, 8)
+                if size_type != _V4L2_FRMSIZE_TYPE_DISCRETE:
+                    break  # continuous/stepwise: no fixed list worth printing
+                sizes.append((width, height, _frame_rates(fd, pixelformat, width, height)))
+            formats.append((fourcc_name(pixelformat), sizes))
+    finally:
+        os.close(fd)
+    return formats
+
+
 def _classify(device: Path):
     """(is_capture, human description) for one V4L2 node."""
     info = _v4l2_capability(device)
@@ -514,6 +595,13 @@ def list_cameras() -> None:
         print(f"  {str(device):<16} {name[:34]:<36} {status}")
         for link in links:
             print(f"  {'':<16} stable path: {link}")
+        # The config must name one of these exactly, or lerobot refuses to connect.
+        for fourcc, sizes in _v4l2_modes(device):
+            if sizes:
+                listed = "  ".join(
+                    f"{w}x{h}@{'/'.join(str(r) for r in rates) if rates else '?'}" for w, h, rates in sizes
+                )
+                print(f"  {'':<16} {fourcc:<5} {listed}")
 
     if not usable:
         print("\nNothing captured. If the arm script or another viewer is running, stop it and retry.")
@@ -578,6 +666,10 @@ def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview"
             frame = camera.read()  # RGB, as lerobot hands it to the policy
         except Exception as exc:
             print(f"  FAILED to open: {exc}")
+            print(f"    the config asks for {cam_cfg.width}x{cam_cfg.height} @ {cam_cfg.fps}fps"
+                  + (f" ({cam_cfg.fourcc})" if getattr(cam_cfg, "fourcc", None) else ""))
+            print("    run `python soarm-test.py --list-cameras` for the modes this camera has,")
+            print("    and set width/height in config/default.yaml to one of them exactly.")
             continue
         finally:
             if camera.is_connected:
