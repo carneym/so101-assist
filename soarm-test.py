@@ -80,8 +80,9 @@ APP_NAME = "soarm-pi05"
 DEFAULT_MODEL = "lerobot/pi05_base"
 
 # Pinned so a lerobot release can't silently change the policy/processor API underneath
-# the remote half. Keep this close to whatever you have installed locally.
-LEROBOT_VERSION = "0.6.2"
+# the remote half. Matches the version installed locally, so both halves share identical
+# policy and normalization semantics — one less variable when something looks wrong.
+LEROBOT_VERSION = "0.6.1"
 
 # ~3.3B params in bf16 (PaliGemma 3B + the action expert) plus 10 flow-matching steps
 # per call. L40S is the latency/price sweet spot; "A10G" is cheaper and ~2x slower,
