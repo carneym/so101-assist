@@ -50,6 +50,10 @@ workspace_fence:                 # meters, robot base frame
   y: [-0.45, 0.45]
   z: [0.08, 0.65]
 
+# Each UVC camera registers TWO /dev/video nodes (capture + metadata), so index N is
+# not /dev/videoN, and the mapping can shift on replug or reboot. `soarm-test.py` also
+# accepts `path:` instead of `index:` -- a /dev/v4l/by-id/... symlink always resolves to
+# the same physical camera. List them with:  ls -l /dev/v4l/by-id/
 cameras:
   overhead: { index: 0, width: 1280, height: 720, fps: 30 }
   wrist:    { index: 2, width: 640,  height: 480, fps: 30 }

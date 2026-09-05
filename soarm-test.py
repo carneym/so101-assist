@@ -339,12 +339,11 @@ def _camera_configs(cfg: dict) -> dict:
     """
     from lerobot.cameras.opencv import OpenCVCameraConfig
 
-    # lerobot defaults to the ANY backend, which on Windows means MSMF — slow to probe
-    # and it enumerates devices differently than DirectShow. so101_assist's own capture
-    # path (perception/camera.py) forces DSHOW there, so match it: otherwise the indices
-    # you confirmed with scripts/camera_test.py may not be the ones opened here.
     extra = {}
     if sys.platform == "win32":
+        # lerobot defaults to the ANY backend, which on Windows means MSMF — slow to probe
+        # and it enumerates devices differently than DirectShow. so101_assist's own capture
+        # path (perception/camera.py) forces DSHOW there, so match it.
         try:
             from lerobot.cameras import Cv2Backends
 
@@ -352,12 +351,22 @@ def _camera_configs(cfg: dict) -> dict:
         except ImportError:  # older lerobot without the backend selector
             pass
 
-    cameras = {
-        name: OpenCVCameraConfig(
-            index_or_path=spec["index"], width=spec["width"], height=spec["height"], fps=spec["fps"], **extra
+    cameras = {}
+    for name, spec in cfg.get("cameras", {}).items():
+        # A camera entry may name either an `index:` or a `path:`. Prefer a path on Linux:
+        # each UVC camera registers two /dev/video nodes (capture + metadata), so index N
+        # is not device N, and the mapping shifts on replug/reboot. A stable
+        # /dev/v4l/by-id/... symlink always opens the same physical camera.
+        if "path" in spec:
+            target = str(spec["path"])
+        elif "index" in spec:
+            target = int(spec["index"])
+        else:
+            raise SystemExit(f"camera '{name}' needs either an `index:` or a `path:` in the config")
+        cameras[name] = OpenCVCameraConfig(
+            index_or_path=target, width=spec["width"], height=spec["height"], fps=spec["fps"], **extra
         )
-        for name, spec in cfg.get("cameras", {}).items()
-    }
+
     if not cameras:
         raise SystemExit("No cameras in config/default.yaml — π₀.₅ needs at least one image stream.")
     return cameras
