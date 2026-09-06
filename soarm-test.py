@@ -732,6 +732,80 @@ def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview"
     print(f"\nwrote to {out}/ — open the *_model_view.png files: that is all π₀.₅ gets to see.")
 
 
+def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str = "so101_assist",
+              joint: str = "wrist_flex", degrees: float = 6.0) -> None:
+    """Prove the servos accept motion, independently of the policy.
+
+    Reads torque state and position, nudges ONE joint, re-reads, and reports whether the
+    arm physically moved. A policy run that logs correctly-clamped goals while nothing
+    moves cannot distinguish "commands rejected" from "commands never sent"; this can.
+
+    Runs standalone: `python soarm-test.py --check-arm`. No Modal, no cameras, no policy.
+    """
+    cfg = _load_yaml(REPO_ROOT / config)
+    port = port or cfg.get("arm", {}).get("port", "/dev/ttyACM0")
+    calib_dir = REPO_ROOT / ".cache" / "lerobot_calibration"
+    _lerobot_calibration(REPO_ROOT / "config/calibration/arm.json", calib_dir, robot_id)
+
+    # No cameras: this is about the motor bus alone, and opening cameras only adds
+    # failure modes to a test whose whole point is isolating one.
+    robot, _ = _build_robot({**cfg, "cameras": {}}, port, calib_dir, robot_id, degrees + 1.0, 5.0)
+    try:
+        robot.connect(calibrate=False)
+    except TypeError:
+        robot.connect()
+    if not robot.is_calibrated:
+        robot.bus.write_calibration(robot.calibration)
+
+    try:
+        print(f"\nport {port}, joint under test: {joint}\n")
+        torque = {m: robot.bus.read("Torque_Enable", m) for m in robot.bus.motors}
+        print("  Torque_Enable per motor:")
+        for motor, value in torque.items():
+            print(f"    {motor:<15} {value}   {'ON' if value else 'OFF  <-- cannot move'}")
+
+        if not all(torque.values()):
+            print("\n  enabling torque explicitly ...")
+            robot.bus.enable_torque()
+            torque = {m: robot.bus.read("Torque_Enable", m) for m in robot.bus.motors}
+            print("  after enable_torque():", {m: v for m, v in torque.items()})
+            if not all(torque.values()):
+                print("  STILL OFF — the servos are refusing torque (overload latch? power?).")
+                return
+
+        start = robot.get_observation()[f"{joint}.pos"]
+        target = start + degrees
+        print(f"\n  {joint}: at {start:.2f} deg, commanding {target:.2f} deg "
+              f"({degrees:+.1f}) in {abs(degrees) / (degrees + 1.0):.0f}+ steps ...")
+
+        moved = start
+        for _ in range(40):  # max_relative_target caps each write, so step until there
+            robot.send_action({f"{joint}.pos": target})
+            time.sleep(0.05)
+            moved = robot.get_observation()[f"{joint}.pos"]
+            if abs(moved - target) < 0.5:
+                break
+
+        delta = moved - start
+        print(f"  {joint}: now {moved:.2f} deg  (moved {delta:+.2f} of {degrees:+.1f} requested)")
+        if abs(delta) < 0.5:
+            print("\n  NOT MOVING. Torque reads on, the write succeeded, the joint did not move.")
+            print("  Likely: servo overload latch (power-cycle the arm), a calibration position")
+            print("  limit pinning this joint, or mechanical binding. Try --joint gripper to")
+            print("  test a different servo, and check the arm is not at the end of its travel.")
+        else:
+            print("\n  The bus and this servo are fine — motion commands do reach the hardware.")
+            print(f"  returning to {start:.2f} deg ...")
+            for _ in range(40):
+                robot.send_action({f"{joint}.pos": start})
+                time.sleep(0.05)
+                if abs(robot.get_observation()[f"{joint}.pos"] - start) < 0.5:
+                    break
+    finally:
+        robot.disconnect()
+        print("disconnected (torque left enabled).")
+
+
 def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relative_target: float,
                  max_gripper_step: float):
     """Construct the LeRobot SO101Follower from config/default.yaml + our calibration."""
@@ -897,6 +971,15 @@ def main(
         print("writing calibration to the servos ...")
         robot.bus.write_calibration(robot.calibration)
 
+    # configure() should have left torque on, but this project's own driver makes
+    # enabling it an explicit act, and a silent no-torque run looks exactly like a
+    # working one in the logs — every command clamps correctly and nothing moves.
+    robot.bus.enable_torque()
+    torque = {m: robot.bus.read("Torque_Enable", m) for m in robot.bus.motors}
+    if not all(torque.values()):
+        raise SystemExit(f"torque is off on {[m for m, v in torque.items() if not v]}; "
+                         "run `python soarm-test.py --check-arm` to diagnose")
+
     # Calibrated travel, used to clip every commanded target (belt and braces on top of
     # max_relative_target and the servos' own firmware limits).
     limits = list(zip(stats["observation.state"]["q01"], stats["observation.state"]["q99"]))
@@ -938,11 +1021,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preview", action="store_true", help="save what each camera sees, and what the model sees")
     parser.add_argument("--list-cameras", action="store_true", help="show which physical camera is on which device node")
+    parser.add_argument("--check-arm", action="store_true", help="nudge one joint and report whether the arm moved")
+    parser.add_argument("--joint", default="wrist_flex", help="joint for --check-arm")
+    parser.add_argument("--port", default="", help="serial port override for --check-arm")
     parser.add_argument("--config", default="config/default.yaml")
     parser.add_argument("--out-dir", default="camera-preview")
     args = parser.parse_args()
     if args.list_cameras:
         list_cameras()
+        raise SystemExit(0)
+    if args.check_arm:
+        check_arm(config=args.config, port=args.port, joint=args.joint)
         raise SystemExit(0)
     if not args.preview:
         sys.exit(
