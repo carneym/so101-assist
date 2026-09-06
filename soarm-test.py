@@ -108,7 +108,11 @@ REPO_ROOT = Path(__file__).resolve().parent
 hf_cache = modal.Volume.from_name("soarm-pi05-hf-cache", create_if_missing=True)
 
 inference_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    # 3.12 is the floor: lerobot 0.6.x declares requires-python = ">=3.12", so 3.11 fails
+    # the install outright. It is also the one series every Modal image-builder version
+    # supports, so this cannot break on that axis either. Raise it to match your local
+    # interpreter if you prefer; do not lower it.
+    modal.Image.debian_slim(python_version="3.12")
     .apt_install("git", "libglib2.0-0")  # git: some HF download paths; glib: opencv runtime
     .pip_install(
         # [pi] adds transformers + scipy, which is what pi0/pi0.5 need on top of core lerobot.
