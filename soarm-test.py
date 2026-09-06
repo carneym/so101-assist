@@ -79,6 +79,12 @@ APP_NAME = "soarm-pi05"
 # with --model once you have a finetune of your own (see the module docstring).
 DEFAULT_MODEL = "lerobot/pi05_base"
 
+# lerobot's pi0.5 processor hardcodes this tokenizer (see processor_pi05.py). It is a
+# GATED repo: loading it needs an HF token belonging to an account that has accepted
+# Google's Gemma licence on the model page. Checked before the weights download, because
+# otherwise the failure lands several GB and many minutes later.
+TOKENIZER_REPO = "google/paligemma-3b-pt-224"
+
 # Pinned so a lerobot release can't silently change the policy/processor API underneath
 # the remote half. Matches the version installed locally, so both halves share identical
 # policy and normalization semantics — one less variable when something looks wrong.
@@ -187,6 +193,23 @@ class Pi05Server:
             },
         }
         cfg.output_features = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(state_dim,))}
+
+        # Preflight: touch the smallest file in the gated tokenizer repo. This is the one
+        # step that fails on a missing or unaccepted licence, and it costs a few KB, so
+        # do it before pulling ~7 GB of weights that would then go unused.
+        from huggingface_hub import hf_hub_download
+
+        try:
+            hf_hub_download(TOKENIZER_REPO, "tokenizer_config.json")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read the gated tokenizer repo {TOKENIZER_REPO}: {exc}\n"
+                f"  1. sign in at https://huggingface.co/{TOKENIZER_REPO} and accept the Gemma licence\n"
+                "  2. make a READ token at https://huggingface.co/settings/tokens\n"
+                "     (a fine-grained token also needs 'Read access to contents of all public gated repos')\n"
+                "  3. export HF_TOKEN=hf_... in the shell you run `modal run` from, then retry"
+            ) from exc
+        print(f"[modal] gated tokenizer {TOKENIZER_REPO} is readable")
 
         print(f"[modal] loading {self.model_id} ...")
         t0 = time.perf_counter()
