@@ -688,7 +688,8 @@ def preview(config: str = "config/default.yaml", out_dir: str = "camera-preview"
     print(f"\nwrote to {out}/ — open the *_model_view.png files: that is all π₀.₅ gets to see.")
 
 
-def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relative_target: float):
+def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relative_target: float,
+                 max_gripper_step: float):
     """Construct the LeRobot SO101Follower from config/default.yaml + our calibration."""
     # lerobot >= 0.6 moved the SO-100/SO-101 followers into a shared module.
     try:
@@ -704,10 +705,15 @@ def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relat
         calibration_dir=calib_dir,
         cameras=cameras,
         use_degrees=True,  # matches the units our normalization stats are computed in
-        # Per-command safety cap: every joint target is clipped to this many degrees from
-        # where the joint actually is (gripper: units of its 0..100 range). This is the
-        # main guard against an out-of-distribution action chunk throwing the arm around.
-        max_relative_target=max_relative_target,
+        # Per-command safety cap: every joint target is clipped to this far from where the
+        # joint actually is, which makes the cap a SPEED limit — cap x fps deg/s. This is
+        # the main guard against an out-of-distribution action chunk throwing the arm
+        # around. The gripper is on its own 0..100 scale, not degrees, and needs a larger
+        # allowance to close in a usable time, so it gets its own value.
+        max_relative_target={
+            **{joint: max_relative_target for joint in JOINTS if joint != "gripper"},
+            "gripper": max_gripper_step,
+        },
         # Follow the project's rule that torque-off is an explicit act, so exiting the
         # script never drops whatever the gripper is holding.
         disable_torque_on_disconnect=False,
@@ -759,7 +765,8 @@ def main(
     fps: int = 30,
     exec_steps: int = 25,
     max_steps: int = 900,
-    max_relative_target: float = 8.0,
+    max_relative_target: float = 0.75,
+    max_gripper_step: float = 3.0,
     model: str = DEFAULT_MODEL,
     stats_dataset: str = "",
     robot_id: str = "so101_assist",
@@ -777,7 +784,10 @@ def main(
         exec_steps: how many actions of each 50-step chunk to execute before re-planning.
             Fewer = more reactive and more GPU calls; more = smoother but staler.
         max_steps: hard cap on commands per instruction (900 = 30 s at 30 fps).
-        max_relative_target: per-command joint-move cap, in degrees. Start small.
+        max_relative_target: per-command arm-joint cap in degrees. This is a speed limit:
+            the arm can move at most `max_relative_target * fps` deg/s. The default
+            matches the 0.4 rad/s shoulder cap this project uses elsewhere.
+        max_gripper_step: per-command gripper cap, in units of its 0..100 range.
         model: any π₀.₅ checkpoint on the Hub; point it at your finetune when you have one.
         stats_dataset: optional SO-101 LeRobot dataset whose statistics to normalize with,
             instead of the ones derived from your calibration file.
@@ -797,8 +807,10 @@ def main(
     print(f"  model         {model}")
     print(f"  arm port      {port}")
     print(f"  calibration   {calib_src.relative_to(REPO_ROOT)}")
-    print(f"  safety        <= {max_relative_target} deg per command"
+    print(f"  safety        <= {max_relative_target} deg/command x {fps} fps "
+          f"= {max_relative_target * fps:.0f} deg/s max joint speed"
           + ("  [DRY RUN — no motion]" if dry_run else ""))
+    print(f"                gripper <= {max_gripper_step}/command ({max_gripper_step * fps:.0f} units/s of 0..100)")
     print("  NOTE: no pi0.5 checkpoint is trained on the SO-101. Motion from the base")
     print("        model is unvalidated — try --dry-run first and stay near the power switch.")
     print("=" * 78)
@@ -812,10 +824,13 @@ def main(
         stats = _stats_from_dataset(stats_dataset, stats)
 
     # --- hardware --------------------------------------------------------------------
-    robot, cameras = _build_robot(cfg, port, calib_dir, robot_id, max_relative_target)
+    robot, cameras = _build_robot(cfg, port, calib_dir, robot_id, max_relative_target, max_gripper_step)
     print(f"connecting to the arm and {len(cameras)} camera(s): {', '.join(cameras)} ...")
     # calibrate=False keeps connect() non-interactive; we push the calibration ourselves
     # rather than letting lerobot prompt for a fresh range-of-motion sweep.
+    # NOTE: connect() -> configure() runs its motor writes inside `bus.torque_disabled()`,
+    # which RE-ENABLES torque on exit. So the arm is live and holding position from here
+    # on, in --dry-run too. That is also why send_action actually moves it.
     try:
         robot.connect(calibrate=False)
     except TypeError:  # older lerobot without the keyword
