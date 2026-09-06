@@ -6,6 +6,8 @@ config/calibration/*.json
 config/tuning.json
 config/arm_status.json
 *.mp4
+# LeRobot-shaped calibration written by soarm-test.py
+.cache/
 .ruff_cache/
 *.egg-info/
 # model weights auto-downloaded by ultralytics/CLIP on first --detect run
@@ -14,3 +16,4 @@ config/arm_status.json
 # accidental nested git repos
 /so101-assist/
 tests/so101-assist/
+camera-preview/

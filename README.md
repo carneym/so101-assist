@@ -61,6 +61,26 @@ Then follow the **[getting-started tutorial](docs/getting-started.md)**
 **[docs/controls.md](docs/controls.md)** for the full control map. Add
 the `perception,voice` extras for Phase 2+.
 
+## Cloud policy test (pi0.5 on Modal)
+
+`soarm-test.py` is a standalone experiment, outside the node architecture above: it
+drives the arm directly from a spoken-style instruction using the LeRobot pi0.5
+policy, with the forward pass running on a Modal GPU.
+
+```bash
+pip install "modal>=1.5" "lerobot[feetech]>=0.6" opencv-python pyyaml
+python soarm-test.py --preview            # check camera aim (no GPU, no arm)
+modal setup && export HF_TOKEN=...        # the PaliGemma tokenizer repo is gated
+modal run soarm-test.py --dry-run         # full loop, no motion
+modal run soarm-test.py --task "pick up the glasses"
+```
+
+It reuses `config/default.yaml` (port, cameras) and `config/calibration/arm.json`
+(motor calibration, and the normalization ranges handed to the policy). Note that no
+pi0.5 checkpoint is trained on the SO-101, so out of the box this is an
+inference-plumbing test, not a working manipulation policy — see the script's
+docstring.
+
 ## Safety notes
 
 - All motion passes through one controller with hard velocity caps.
