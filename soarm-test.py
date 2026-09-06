@@ -159,6 +159,9 @@ with inference_image.imports():
     # Keep the loaded model resident between commands: you type a new instruction, the
     # same warm container answers. Raise this if you think between prompts a lot.
     scaledown_window=5 * 60,
+    # A bad token or an unaccepted licence fails identically every time, so retrying it
+    # just spends GPU minutes to print the same traceback three times.
+    retries=0,
     # Resolved on THIS machine when `modal run` starts, so the gated PaliGemma tokenizer
     # download inside the container uses your local HF_TOKEN. No Modal secret to create.
     secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})],
@@ -199,15 +202,29 @@ class Pi05Server:
         # do it before pulling ~7 GB of weights that would then go unused.
         from huggingface_hub import hf_hub_download
 
+        # An empty HF_TOKEN is worse than none: huggingface_hub's get_token() maps "" to
+        # None, so the request goes out unauthenticated and the Hub answers 401 rather
+        # than the 403 you would get from a real token lacking the licence.
+        if not os.environ.get("HF_TOKEN", "").strip():
+            raise RuntimeError(
+                "No HF_TOKEN reached the container, so the gated tokenizer cannot be read.\n"
+                "  export HF_TOKEN=hf_... in the shell you run `modal run` from, then retry.\n"
+                "  (the token is forwarded from your local environment; there is no Modal secret to create)"
+            )
         try:
             hf_hub_download(TOKENIZER_REPO, "tokenizer_config.json")
         except Exception as exc:
+            unauthorized = "401" in str(exc)
+            reason = (
+                "the token was rejected — check it is a valid READ token and not expired"
+                if unauthorized
+                else f"the token works but has no access — accept the Gemma licence at "
+                f"https://huggingface.co/{TOKENIZER_REPO}"
+            )
             raise RuntimeError(
-                f"Cannot read the gated tokenizer repo {TOKENIZER_REPO}: {exc}\n"
-                f"  1. sign in at https://huggingface.co/{TOKENIZER_REPO} and accept the Gemma licence\n"
-                "  2. make a READ token at https://huggingface.co/settings/tokens\n"
-                "     (a fine-grained token also needs 'Read access to contents of all public gated repos')\n"
-                "  3. export HF_TOKEN=hf_... in the shell you run `modal run` from, then retry"
+                f"Cannot read the gated tokenizer repo {TOKENIZER_REPO}: {reason}.\n"
+                "  A fine-grained token also needs 'Read access to contents of all public gated repos'.\n"
+                f"  Original error: {exc}"
             ) from exc
         print(f"[modal] gated tokenizer {TOKENIZER_REPO} is readable")
 
@@ -828,6 +845,20 @@ def main(
 
     cfg = _load_yaml(cfg_path)
     port = port or cfg.get("arm", {}).get("port", "/dev/ttyACM0")
+
+    # Checked here, locally, because the alternative is a multi-minute container start
+    # that loads 7 GB of weights and only then discovers it cannot read the tokenizer.
+    if not os.environ.get("HF_TOKEN", "").strip():
+        raise SystemExit(
+            "HF_TOKEN is not set in this shell.\n"
+            f"π₀.₅'s tokenizer comes from {TOKENIZER_REPO}, a gated repo, so a token is required:\n"
+            f"  1. sign in at https://huggingface.co/{TOKENIZER_REPO} and accept the Gemma licence\n"
+            "  2. create a READ token at https://huggingface.co/settings/tokens\n"
+            "  3. export HF_TOKEN=hf_...   then re-run\n"
+            "Verify it works before starting a container:\n"
+            "  python -c \"from huggingface_hub import hf_hub_download as d; "
+            f"print(d('{TOKENIZER_REPO}', 'tokenizer_config.json'))\""
+        )
 
     print("=" * 78)
     print("SO-101 + pi0.5 (LeRobot policy, Modal inference)")
