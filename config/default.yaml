@@ -54,9 +54,25 @@ workspace_fence:                 # meters, robot base frame
 # not /dev/videoN, and the mapping can shift on replug or reboot. `soarm-test.py` also
 # accepts `path:` instead of `index:` -- a /dev/v4l/by-id/... symlink always resolves to
 # the same physical camera. List them with:  ls -l /dev/v4l/by-id/
+# Roles confirmed 2026-09-06 by `python soarm-test.py --list-cameras`:
+#   Innomaker U20CAM-720P (/dev/video2) is the OVERHEAD camera
+#   Sonix USB2.0_CAM1     (/dev/video0) is the WRIST camera
+# `index:` is kept because perception/camera.py reads it; soarm-test.py prefers `path:`.
+# 640x480 rather than 1280x720: the Sonix only manages 10fps at 720p, and pi0.5 pads
+# every frame into 224x224 anyway, where 4:3 keeps 75% real pixels against 16:9's 56%.
 cameras:
-  overhead: { index: 0, width: 1280, height: 720, fps: 30 }
-  wrist:    { index: 2, width: 640,  height: 480, fps: 30 }
+  overhead:
+    index: 2
+    path: /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index0
+    width: 640
+    height: 480
+    fps: 30
+  wrist:
+    index: 0
+    path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB2.0_CAM1_USB2.0_CAM1-video-index0
+    width: 640
+    height: 480
+    fps: 30
 
 perception:
   detector: yolo_world           # yolo_world | owlv2
