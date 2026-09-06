@@ -383,7 +383,7 @@ def _encode_frame(frame, max_width: int = 320) -> bytes:
     return buf.tobytes()
 
 
-def _camera_configs(cfg: dict) -> dict:
+def _camera_configs(cfg: dict, require: bool = True) -> dict:
     """Build one LeRobot camera config per entry in the config's `cameras:` block.
 
     Insertion order matters downstream: π₀.₅ assigns images to camera *slots* by
@@ -427,7 +427,9 @@ def _camera_configs(cfg: dict) -> dict:
             index_or_path=target, width=spec["width"], height=spec["height"], fps=spec["fps"], **extra_cam
         )
 
-    if not cameras:
+    # A policy run needs an image stream; --check-arm deliberately opens no cameras, so
+    # emptiness is only an error when the caller says so.
+    if not cameras and require:
         raise SystemExit("No cameras in config/default.yaml — π₀.₅ needs at least one image stream.")
     return cameras
 
@@ -749,7 +751,8 @@ def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str
 
     # No cameras: this is about the motor bus alone, and opening cameras only adds
     # failure modes to a test whose whole point is isolating one.
-    robot, _ = _build_robot({**cfg, "cameras": {}}, port, calib_dir, robot_id, degrees + 1.0, 5.0)
+    robot, _ = _build_robot({**cfg, "cameras": {}}, port, calib_dir, robot_id, degrees + 1.0, 5.0,
+                            require_cameras=False)
     try:
         robot.connect(calibrate=False)
     except TypeError:
@@ -807,7 +810,7 @@ def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str
 
 
 def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relative_target: float,
-                 max_gripper_step: float):
+                 max_gripper_step: float, require_cameras: bool = True):
     """Construct the LeRobot SO101Follower from config/default.yaml + our calibration."""
     # lerobot >= 0.6 moved the SO-100/SO-101 followers into a shared module.
     try:
@@ -815,7 +818,7 @@ def _build_robot(cfg: dict, port: str, calib_dir: Path, robot_id: str, max_relat
     except ImportError:  # lerobot <= 0.5
         from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
 
-    cameras = _camera_configs(cfg)
+    cameras = _camera_configs(cfg, require=require_cameras)
 
     robot_cfg = SO101FollowerConfig(
         port=port,
