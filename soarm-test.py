@@ -922,10 +922,10 @@ def _run_episode(robot, server, task: str, cameras: list[str], limits, fps: int,
 def main(
     task: str = "",
     port: str = "",
-    fps: int = 30,
-    exec_steps: int = 25,
-    max_steps: int = 900,
-    max_relative_target: float = 0.75,
+    fps: int = 8,
+    exec_steps: int = 10,
+    max_steps: int = 480,
+    max_relative_target: float = 3.0,
     max_gripper_step: float = 3.0,
     model: str = DEFAULT_MODEL,
     stats_dataset: str = "",
@@ -943,10 +943,16 @@ def main(
         fps: rate at which chunk actions are streamed to the servos.
         exec_steps: how many actions of each 50-step chunk to execute before re-planning.
             Fewer = more reactive and more GPU calls; more = smoother but staler.
-        max_steps: hard cap on commands per instruction (900 = 30 s at 30 fps).
-        max_relative_target: per-command arm-joint cap in degrees. This is a speed limit:
-            the arm can move at most `max_relative_target * fps` deg/s. The default
-            matches the 0.4 rad/s shoulder cap this project uses elsewhere.
+        max_steps: hard cap on commands per instruction. This is what sets how long an
+            attempt lasts: duration = max_steps / fps (480 at 8 fps = 60 s). Raise it to
+            give the policy longer; the arm stops and holds when the budget runs out.
+        max_relative_target: per-command arm-joint cap in degrees. It sets TWO things at
+            once, which is easy to get wrong: speed is `cap * fps`, but the cap is also
+            how far the commanded position may lead the measured one, and a position-mode
+            servo's torque is proportional to exactly that. Too small and the arm cannot
+            overcome its own stiction and gravity — it holds still while every command
+            clamps correctly. Use --check-arm to measure the floor for your arm, then keep
+            `cap * fps` near 25 deg/s.
         max_gripper_step: per-command gripper cap, in units of its 0..100 range.
         model: any π₀.₅ checkpoint on the Hub; point it at your finetune when you have one.
         stats_dataset: optional SO-101 LeRobot dataset whose statistics to normalize with,
@@ -985,6 +991,8 @@ def main(
           f"= {max_relative_target * fps:.0f} deg/s max joint speed"
           + ("  [DRY RUN — no motion]" if dry_run else ""))
     print(f"                gripper <= {max_gripper_step}/command ({max_gripper_step * fps:.0f} units/s of 0..100)")
+    print(f"  attempt       {max_steps} steps / {fps} fps = {max_steps / fps:.0f} s, "
+          f"re-planning every {exec_steps / fps:.1f} s  (--max-steps to run longer)")
     print("  NOTE: no pi0.5 checkpoint is trained on the SO-101. Motion from the base")
     print("        model is unvalidated — try --dry-run first and stay near the power switch.")
     print("=" * 78)
