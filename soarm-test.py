@@ -778,14 +778,22 @@ def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str
 
         start = robot.get_observation()[f"{joint}.pos"]
         target = start + degrees
-        print(f"\n  {joint}: at {start:.2f} deg, commanding {target:.2f} deg "
-              f"({degrees:+.1f}) in {abs(degrees) / (degrees + 1.0):.0f}+ steps ...")
+        print(f"\n  {joint}: at {start:.2f} deg, commanding {target:.2f} deg ({degrees:+.1f}) ...")
 
         moved = start
-        for _ in range(40):  # max_relative_target caps each write, so step until there
-            robot.send_action({f"{joint}.pos": target})
+        for step in range(40):  # max_relative_target caps each write, so step until there
+            # Every joint must appear in the action: ensure_safe_goal_position requires the
+            # action's keys to match the max_relative_target dict exactly. The others are
+            # commanded to their own measured position, i.e. told to hold still.
+            observation = robot.get_observation()
+            action = {f"{j}.pos": observation[f"{j}.pos"] for j in JOINTS}
+            action[f"{joint}.pos"] = target
+            robot.send_action(action)
             time.sleep(0.05)
+
             moved = robot.get_observation()[f"{joint}.pos"]
+            if step < 3 or step % 10 == 0:
+                print(f"    step {step:2d}: {joint} at {moved:7.2f} deg  ({moved - start:+.2f} so far)")
             if abs(moved - target) < 0.5:
                 break
 
@@ -800,7 +808,10 @@ def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str
             print("\n  The bus and this servo are fine — motion commands do reach the hardware.")
             print(f"  returning to {start:.2f} deg ...")
             for _ in range(40):
-                robot.send_action({f"{joint}.pos": start})
+                observation = robot.get_observation()
+                action = {f"{j}.pos": observation[f"{j}.pos"] for j in JOINTS}
+                action[f"{joint}.pos"] = start
+                robot.send_action(action)
                 time.sleep(0.05)
                 if abs(robot.get_observation()[f"{joint}.pos"] - start) < 0.5:
                     break
