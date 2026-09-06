@@ -806,7 +806,35 @@ def check_arm(config: str = "config/default.yaml", port: str = "", robot_id: str
             print("  test a different servo, and check the arm is not at the end of its travel.")
         else:
             print("\n  The bus and this servo are fine — motion commands do reach the hardware.")
-            print(f"  returning to {start:.2f} deg ...")
+
+            # A position-mode servo's torque is proportional to how far the commanded
+            # position leads the measured one, so a small max_relative_target starves it:
+            # the arm holds still while every command clamps "correctly". config/default.yaml
+            # records the same discovery for this project's own controller (5 deg "was the
+            # binding one", raised to 15). Measure the threshold rather than guessing it.
+            print("\n  smallest commanded step that actually moves this joint:")
+            print("    requested   measured   moved?")
+            smallest = None
+            for candidate in (0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0):
+                observation = robot.get_observation()
+                here = observation[f"{joint}.pos"]
+                action = {f"{j}.pos": observation[f"{j}.pos"] for j in JOINTS}
+                action[f"{joint}.pos"] = here + candidate
+                robot.send_action(action)
+                time.sleep(0.3)
+                delta = robot.get_observation()[f"{joint}.pos"] - here
+                ok = abs(delta) > candidate * 0.4
+                if ok and smallest is None:
+                    smallest = candidate
+                print(f"    {candidate:6.2f} deg  {delta:+7.2f} deg   {'yes' if ok else 'no'}")
+            if smallest is not None:
+                print(f"\n  --max-relative-target must be at least ~{smallest} for this joint to move.")
+                print(f"  Speed is that cap x fps, so pair it with a low --fps: "
+                      f"{smallest} x {int(25 / smallest)} = ~25 deg/s.")
+            else:
+                print("\n  Nothing under 5 deg moved it — try --joint shoulder_pan, or raise the range.")
+
+            print(f"\n  returning to {start:.2f} deg ...")
             for _ in range(40):
                 observation = robot.get_observation()
                 action = {f"{j}.pos": observation[f"{j}.pos"] for j in JOINTS}
